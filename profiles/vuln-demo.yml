@@ -1,0 +1,20 @@
+# Класс: намеренно уязвимое демо (sqst-vulnerable-app).
+# Особый профиль: приложение СОДЕРЖИТ уязвимости by design — студенты
+# сканируют его SonarQube по программе курса. Поэтому здесь ВСЕ стадии
+# advisory: конвейер работает как живая витрина находок («что видят
+# gitleaks/semgrep/osv в этом приложении»), но НЕ блокирует ни один PR.
+# secrets тоже A (в отличие от всех остальных классов) — в этом репо и
+# «утёкшие» строки могут быть учебными; блокировать нечего.
+# Санкционированное исключение из инварианта «secrets = B» (см. selftest).
+class: vuln-demo
+stages:
+  secrets: A
+  pii-gate: "off"
+  sast-semgrep: A
+  sast-sonar: "off"
+  sca: A
+  docs-lint: "off"
+  course-lint: "off"
+  container: "off"
+  sbom: "off"
+  dast: "off"

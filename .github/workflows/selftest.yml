@@ -23,19 +23,28 @@ jobs:
           KNOWN = {"secrets","pii-gate","sast-semgrep","sast-sonar","sca",
                    "docs-lint","course-lint","container","sbom","dast"}
           MODES = {"B","A","R","off"}
+          CORE = {"library","service","docs-shelf","course-content"}
+          # vuln-demo — санкционированный класс-исключение: намеренно уязвимое
+          # демо, все стадии advisory (в т.ч. secrets), витрина без блокировок.
+          SECRETS_B_EXEMPT = {"vuln-demo"}
+          def norm(v): return "off" if v is False else str(v)
           bad = []
           files = sorted(glob.glob("profiles/*.yml"))
-          if len(files) != 4: bad.append(f"ожидалось 4 профиля, найдено {len(files)}")
+          names = {f.split("/")[-1][:-4] for f in files}
+          missing_core = CORE - names
+          if missing_core: bad.append(f"нет базовых профилей: {sorted(missing_core)}")
           for f in files:
+              cls = f.split("/")[-1][:-4]
               p = yaml.safe_load(open(f))
               st = p.get("stages", {})
               for k, v in st.items():
-                  v = "off" if v is False else str(v)  # YAML 1.1: off == False
+                  v = norm(v)  # YAML 1.1: off == False
                   if k not in KNOWN: bad.append(f"{f}: неизвестная стадия {k}")
                   if v not in MODES: bad.append(f"{f}: {k}={v} вне {MODES}")
               missing = KNOWN - set(st)
               if missing: bad.append(f"{f}: нет стадий {sorted(missing)}")
-              if st.get("secrets") != "B": bad.append(f"{f}: secrets обязан быть B")
+              if cls not in SECRETS_B_EXEMPT and norm(st.get("secrets")) != "B":
+                  bad.append(f"{f}: secrets обязан быть B (кроме {sorted(SECRETS_B_EXEMPT)})")
           if bad:
               print("\n".join(bad)); sys.exit(1)
           print(f"OK: {len(files)} профилей")
@@ -61,7 +70,7 @@ jobs:
           m0 = ["secrets", "sast-semgrep", "sca"]
           def norm(v):
               return "off" if v is False else str(v)
-          for c in ["library", "service", "docs-shelf", "course-content"]:
+          for c in ["library", "service", "docs-shelf", "course-content", "vuln-demo"]:
               st = yaml.safe_load(open(f"profiles/{c}.yml"))["stages"]
               modes = {s: norm(st.get(s, "off")) for s in m0}
               bad = {s: m for s, m in modes.items() if m not in ("B", "A", "off")}
