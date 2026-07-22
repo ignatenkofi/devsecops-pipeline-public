@@ -15,12 +15,19 @@ name: pipeline-light
 # Тяжёлые стадии (SonarQube CE, DAST, perf) публичным потребителям не
 # положены по security-инварианту (self-hosted раннеры — только приватные
 # репо) и живут в приватной части.
+#
+# Fail-политика: каждая стадия всегда continue-on-error (job не падает на
+# самой находке), а решает финальный gate-шаг — валит job ТОЛЬКО для
+# blocking-стадий (mode B) с находками. Advisory (A) находки → warning, но
+# merge не блокируется. Так режим advisory работает надёжно (условное
+# continue-on-error через ${{ }}-выражение на реальных находках не
+# срабатывало — job падал даже на advisory-стадии).
 
 on:
   workflow_call:
     inputs:
       repo-class:
-        description: "library | service | docs-shelf | course-content"
+        description: "library | service | docs-shelf | course-content | vuln-demo"
         required: true
         type: string
       skip-stages:
@@ -54,11 +61,13 @@ jobs:
           skip-stages: ${{ inputs.skip-stages }}
           extra-stages: ${{ inputs.extra-stages }}
 
-      # Порядок: дешёвое и смертельное — раньше.
+      # Порядок: дешёвое и смертельное — раньше. Каждая стадия
+      # continue-on-error: true — job не падает на находке; вердикт выносит
+      # gate-шаг по mode из профиля.
       - name: "Стадия: secrets (gitleaks)"
         id: secrets
         if: steps.profile.outputs.secrets != 'off'
-        continue-on-error: ${{ steps.profile.outputs.secrets == 'A' }}
+        continue-on-error: true
         uses: ignatenkofi/devsecops-pipeline-public/actions/gitleaks@v1
         with:
           sarif-path: sarif/gitleaks.sarif
@@ -66,7 +75,7 @@ jobs:
       - name: "Стадия: sast-semgrep (offline-rules)"
         id: semgrep
         if: steps.profile.outputs.sast-semgrep != 'off'
-        continue-on-error: ${{ steps.profile.outputs.sast-semgrep == 'A' }}
+        continue-on-error: true
         uses: ignatenkofi/devsecops-pipeline-public/actions/semgrep@v1
         with:
           sarif-path: sarif/semgrep.sarif
@@ -74,7 +83,7 @@ jobs:
       - name: "Стадия: sca (osv-scanner)"
         id: sca
         if: steps.profile.outputs.sca != 'off'
-        continue-on-error: ${{ steps.profile.outputs.sca == 'A' }}
+        continue-on-error: true
         uses: ignatenkofi/devsecops-pipeline-public/actions/osv-scanner@v1
         with:
           sarif-path: sarif/osv.sarif
@@ -84,3 +93,33 @@ jobs:
         uses: ignatenkofi/devsecops-pipeline-public/actions/sarif-report@v1
         with:
           sarif-dir: sarif
+
+      # Финальный вердикт: blocking-стадия (mode B) с находкой → job красный;
+      # advisory (A) находка → warning, merge не блокируется.
+      - name: Gate — blocking-стадии решают статус job
+        if: always()
+        env:
+          M_SECRETS: ${{ steps.profile.outputs.secrets }}
+          M_SEMGREP: ${{ steps.profile.outputs.sast-semgrep }}
+          M_SCA: ${{ steps.profile.outputs.sca }}
+          O_SECRETS: ${{ steps.secrets.outcome }}
+          O_SEMGREP: ${{ steps.semgrep.outcome }}
+          O_SCA: ${{ steps.sca.outcome }}
+        run: |
+          set -euo pipefail
+          fail=0
+          gate() { # $1=mode $2=outcome $3=имя
+            if [ "$2" = "failure" ]; then
+              if [ "$1" = "B" ]; then
+                echo "::error::blocking-стадия '$3' нашла проблемы — merge заблокирован"
+                fail=1
+              else
+                echo "::warning::advisory-стадия '$3' нашла проблемы (merge не блокируется)"
+              fi
+            fi
+          }
+          gate "$M_SECRETS" "$O_SECRETS" secrets
+          gate "$M_SEMGREP" "$O_SEMGREP" sast-semgrep
+          gate "$M_SCA" "$O_SCA" sca
+          [ "$fail" = "0" ] && echo "gate: blocking-находок нет"
+          exit $fail
