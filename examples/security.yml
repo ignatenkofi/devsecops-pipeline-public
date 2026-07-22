@@ -1,0 +1,21 @@
+# Скопируйте этот файл в свой репозиторий как .github/workflows/security.yml
+# и выберите repo-class под тип вашего проекта. Больше ничего настраивать
+# не нужно — состав стадий и fail-политика приходят из профиля.
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pipeline:
+    uses: ignatenkofi/devsecops-pipeline-public/.github/workflows/pipeline-light.yml@v1
+    with:
+      # library | service | docs-shelf | course-content
+      repo-class: library
+
+      # (опционально) выключить стадию точечно:
+      # skip-stages: "sca"
+      # (опционально) включить стадию сверх профиля как advisory:
+      # extra-stages: "sast-semgrep"

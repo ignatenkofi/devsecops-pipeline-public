@@ -1,0 +1,35 @@
+name: sarif-report
+description: >-
+  Приёмник результатов: SARIF-файлы → артефакт прогона + сводка в job
+  summary. Code scanning для приватных репо без Code Security недоступен —
+  каскад по ADR 0003 (артефакт + summary как базовый путь).
+inputs:
+  sarif-dir:
+    required: false
+    default: sarif
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SARIF_DIR: ${{ inputs.sarif-dir }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$SARIF_DIR"
+        {
+          echo "## DevSecOps pipeline — сводка стадий"
+          echo ""
+          echo "| SARIF | находок |"
+          echo "|---|---|"
+          for f in "$SARIF_DIR"/*.sarif; do
+            [ -s "$f" ] || { echo "| $(basename "$f") | — (skip) |"; continue; }
+            n=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(sum(len(r.get('results',[])) for r in d.get('runs',[])))" "$f" 2>/dev/null || echo "?")
+            echo "| $(basename "$f") | $n |"
+          done
+        } >> "$GITHUB_STEP_SUMMARY"
+    - uses: actions/upload-artifact@v4
+      with:
+        name: sarif-${{ github.run_id }}
+        path: ${{ inputs.sarif-dir }}
+        if-no-files-found: ignore
+        retention-days: 30

@@ -1,0 +1,13 @@
+# Класс: сервис/приложение (hw-*, njuska-auto-bot, feedback-relay, демо).
+class: service
+stages:
+  secrets: B
+  pii-gate: A
+  sast-semgrep: B
+  sast-sonar: B      # M1 (полигон)
+  sca: B
+  docs-lint: A       # M1
+  course-lint: "off"
+  container: B       # M1 (critical)
+  sbom: R            # M1
+  dast: A            # M2 (полигон, nightly)

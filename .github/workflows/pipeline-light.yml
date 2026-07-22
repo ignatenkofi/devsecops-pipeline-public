@@ -1,0 +1,86 @@
+name: pipeline-light
+# Публичный переиспользуемый workflow с ЛЁГКИМИ security-стадиями.
+# Зачем отдельный публичный репо: GitHub запрещает публичному репозиторию
+# вызывать reusable workflow / composite action из ПРИВАТНОГО репо (даже с
+# выданным Access). Правило: private→private и public→public — да,
+# public→private — нет. Приватный конвейер devsecops-pipeline обслуживает
+# приватные репо; этот публичный компаньон — публичные.
+#
+# Потребитель (публичный репо) подключается одним файлом-адаптером:
+#   uses: ignatenkofi/devsecops-pipeline-public/.github/workflows/pipeline-light.yml@v1
+# (полный пример — examples/security.yml)
+#
+# Здесь ТОЛЬКО лёгкие стадии (hosted-раннеры, без стендов и лаб-сети):
+#   secrets (gitleaks) · sast-semgrep (offline-rules) · sca (osv-scanner).
+# Тяжёлые стадии (SonarQube CE, DAST, perf) публичным потребителям не
+# положены по security-инварианту (self-hosted раннеры — только приватные
+# репо) и живут в приватной части.
+
+on:
+  workflow_call:
+    inputs:
+      repo-class:
+        description: "library | service | docs-shelf | course-content"
+        required: true
+        type: string
+      skip-stages:
+        description: "через запятую: лёгкие стадии, выключенные точечно"
+        required: false
+        type: string
+        default: ""
+      extra-stages:
+        description: "через запятую: лёгкие стадии сверх профиля (advisory)"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  light:
+    name: "light · ${{ inputs.repo-class }}"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout потребителя
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks смотрит историю PR-диапазона
+
+      - name: Профиль класса
+        id: profile
+        uses: ignatenkofi/devsecops-pipeline-public/actions/profile-resolve@v1
+        with:
+          repo-class: ${{ inputs.repo-class }}
+          skip-stages: ${{ inputs.skip-stages }}
+          extra-stages: ${{ inputs.extra-stages }}
+
+      # Порядок: дешёвое и смертельное — раньше.
+      - name: "Стадия: secrets (gitleaks)"
+        id: secrets
+        if: steps.profile.outputs.secrets != 'off'
+        continue-on-error: ${{ steps.profile.outputs.secrets == 'A' }}
+        uses: ignatenkofi/devsecops-pipeline-public/actions/gitleaks@v1
+        with:
+          sarif-path: sarif/gitleaks.sarif
+
+      - name: "Стадия: sast-semgrep (offline-rules)"
+        id: semgrep
+        if: steps.profile.outputs.sast-semgrep != 'off'
+        continue-on-error: ${{ steps.profile.outputs.sast-semgrep == 'A' }}
+        uses: ignatenkofi/devsecops-pipeline-public/actions/semgrep@v1
+        with:
+          sarif-path: sarif/semgrep.sarif
+
+      - name: "Стадия: sca (osv-scanner)"
+        id: sca
+        if: steps.profile.outputs.sca != 'off'
+        continue-on-error: ${{ steps.profile.outputs.sca == 'A' }}
+        uses: ignatenkofi/devsecops-pipeline-public/actions/osv-scanner@v1
+        with:
+          sarif-path: sarif/osv.sarif
+
+      - name: Отчёт (SARIF → артефакт + summary)
+        if: always()
+        uses: ignatenkofi/devsecops-pipeline-public/actions/sarif-report@v1
+        with:
+          sarif-dir: sarif

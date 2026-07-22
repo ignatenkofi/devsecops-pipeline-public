@@ -1,0 +1,36 @@
+name: osv-scanner
+description: >-
+  Стадия sca: osv-scanner по лок-файлам репозитория. Версия пинована.
+  Отсутствие лок-файлов — не ошибка (репо без зависимостей).
+inputs:
+  sarif-path:
+    required: false
+    default: sarif/osv.sarif
+  version:
+    required: false
+    default: "1.8.5"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        OSV_VERSION: ${{ inputs.version }}
+        SARIF_PATH: ${{ inputs.sarif-path }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "$SARIF_PATH")" /tmp/osv
+        curl -sfL -o /tmp/osv/osv-scanner \
+          "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
+        chmod +x /tmp/osv/osv-scanner
+        set +e
+        /tmp/osv/osv-scanner scan --recursive --format sarif --output "$SARIF_PATH" .
+        rc=$?
+        set -e
+        # exit-коды osv-scanner: 0 чисто; 1 найдены уязвимости;
+        # 128 не найдено ни одного пакета/лок-файла — трактуем как skip.
+        case "$rc" in
+          0) echo "sca: чисто" ;;
+          1) echo "::warning::sca: найдены уязвимости (см. SARIF)"; exit 1 ;;
+          128) echo "::notice::sca: лок-файлы не найдены — стадия пропущена"; : > "$SARIF_PATH" ;;
+          *) echo "::error::osv-scanner rc=$rc"; exit "$rc" ;;
+        esac

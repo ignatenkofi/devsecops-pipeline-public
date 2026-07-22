@@ -1,0 +1,4 @@
+sarif/
+*.sarif
+.DS_Store
+* 2.*
