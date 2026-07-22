@@ -1,0 +1,43 @@
+# Стартовый offline-набор (M0): универсальные правила уровня ERROR.
+# Расширение набора — задача M1 (nightly-триггер обновляет и прогоняет
+# на fixtures). Правила намеренно консервативные: мало ложных срабатываний.
+rules:
+  - id: py-eval-usage
+    languages: [python]
+    severity: ERROR
+    message: eval() на данных — прямой путь к code injection; замените на ast.literal_eval или явный парсинг.
+    patterns:
+      - pattern: eval(...)
+      - pattern-not: eval("...")
+
+  - id: py-subprocess-shell-true
+    languages: [python]
+    severity: ERROR
+    message: subprocess с shell=True и нестатической командой — command injection; передавайте argv-списком.
+    patterns:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - pattern-not: subprocess.$FUNC("...", shell=True, ...)
+
+  - id: py-yaml-unsafe-load
+    languages: [python]
+    severity: ERROR
+    message: yaml.load без SafeLoader исполняет произвольные теги; используйте yaml.safe_load.
+    patterns:
+      - pattern: yaml.load($X)
+
+  - id: js-eval-usage
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: eval()/new Function() на данных — code injection.
+    pattern-either:
+      - pattern: eval($X)
+      - pattern: new Function(...)
+
+  - id: js-child-process-exec-concat
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: exec с конкатенацией строк — command injection; используйте execFile с argv.
+    patterns:
+      - pattern-either:
+          - pattern: $CP.exec($A + $B, ...)
+          - pattern: $CP.exec(`...${$X}...`, ...)

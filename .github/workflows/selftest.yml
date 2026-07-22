@@ -1,0 +1,117 @@
+name: selftest
+# CI самого конвейера: валидность профилей и workflow, локальный прогон
+# composite actions (позитив на чистом собственном коде, негатив на
+# синтетических находках, генерируемых в рантайме — фикстуры с «секретами»
+# в git не живут). Floating-тег v1 двигается только после зелёного
+# selftest (ADR 0006).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Профили валидны и согласованы со списком стадий
+        run: |
+          python3 - <<'PY'
+          import glob, sys, yaml
+          KNOWN = {"secrets","pii-gate","sast-semgrep","sast-sonar","sca",
+                   "docs-lint","course-lint","container","sbom","dast"}
+          MODES = {"B","A","R","off"}
+          bad = []
+          files = sorted(glob.glob("profiles/*.yml"))
+          if len(files) != 4: bad.append(f"ожидалось 4 профиля, найдено {len(files)}")
+          for f in files:
+              p = yaml.safe_load(open(f))
+              st = p.get("stages", {})
+              for k, v in st.items():
+                  v = "off" if v is False else str(v)  # YAML 1.1: off == False
+                  if k not in KNOWN: bad.append(f"{f}: неизвестная стадия {k}")
+                  if v not in MODES: bad.append(f"{f}: {k}={v} вне {MODES}")
+              missing = KNOWN - set(st)
+              if missing: bad.append(f"{f}: нет стадий {sorted(missing)}")
+              if st.get("secrets") != "B": bad.append(f"{f}: secrets обязан быть B")
+          if bad:
+              print("\n".join(bad)); sys.exit(1)
+          print(f"OK: {len(files)} профилей")
+          PY
+
+      - name: actionlint (workflow-синтаксис)
+        run: |
+          curl -sfL https://github.com/rhysd/actionlint/releases/download/v1.7.1/actionlint_1.7.1_linux_amd64.tar.gz \
+            | tar -xz -C /tmp actionlint
+          /tmp/actionlint -color
+
+  stages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: profile-resolve — все классы разрешаются
+        run: |
+          python3 - <<'PY'
+          import yaml
+          m0 = ["secrets", "sast-semgrep", "sca"]
+          def norm(v):
+              return "off" if v is False else str(v)
+          for c in ["library", "service", "docs-shelf", "course-content"]:
+              st = yaml.safe_load(open(f"profiles/{c}.yml"))["stages"]
+              modes = {s: norm(st.get(s, "off")) for s in m0}
+              bad = {s: m for s, m in modes.items() if m not in ("B", "A", "off")}
+              assert not bad, f"{c}: {bad}"
+              print(f"resolve {c}: {modes}")
+          PY
+
+      - name: "Позитив: собственный код конвейера чист (library-профиль)"
+        id: self
+        uses: ./actions/gitleaks
+        with:
+          sarif-path: sarif/gitleaks.sarif
+
+      - name: "Позитив: semgrep offline-rules на своём коде"
+        uses: ./actions/semgrep
+        with:
+          sarif-path: sarif/semgrep.sarif
+
+      - name: "Позитив: osv-scanner (лок-файлов нет — skip)"
+        uses: ./actions/osv-scanner
+        with:
+          sarif-path: sarif/osv.sarif
+
+      - name: "Негатив: gitleaks обязан найти синтетический секрет"
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/leaky
+          # фейковый ключ из документации AWS, собирается в рантайме из
+          # фрагментов — в исходниках репо нет ни одного цельного
+          # секрето-подобного токена (даже фейкового)
+          printf 'aws_access_key_id = %s%s\naws_secret_access_key = %s%s\n' \
+            "AKIA" "IOSFODNN7EXAMPLE" \
+            "wJalrXUtnFEMI/K7MDENG/" "bPxRfiCYEXAMPLEKEY" > /tmp/leaky/creds.txt
+          if /tmp/gitleaks/gitleaks detect --no-git --source /tmp/leaky --exit-code 1; then
+            echo "::error::gitleaks не нашёл синтетический секрет"; exit 1
+          fi
+          echo "негатив ок: секрет найден"
+
+      - name: "Негатив: semgrep обязан поймать eval()"
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/vuln
+          printf 'user_input = input()\nresult = eval(user_input)\n' > /tmp/vuln/bad.py
+          if semgrep scan --metrics=off --error --config actions/semgrep/rules /tmp/vuln; then
+            echo "::error::semgrep не поймал eval()"; exit 1
+          fi
+          echo "негатив ок: eval() пойман"
+
+      - name: Отчёт
+        if: always()
+        uses: ./actions/sarif-report
+        with:
+          sarif-dir: sarif

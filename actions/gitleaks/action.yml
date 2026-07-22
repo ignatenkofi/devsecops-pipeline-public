@@ -1,0 +1,29 @@
+name: gitleaks
+description: >-
+  Стадия secrets: gitleaks по рабочему дереву и истории checkout'а.
+  Версия пинована. Суппрессии — у потребителя в .gitleaks.toml.
+inputs:
+  sarif-path:
+    required: false
+    default: sarif/gitleaks.sarif
+  version:
+    required: false
+    default: "8.18.4"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GL_VERSION: ${{ inputs.version }}
+        SARIF_PATH: ${{ inputs.sarif-path }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "$SARIF_PATH")" /tmp/gitleaks
+        curl -sfL "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VERSION}/gitleaks_${GL_VERSION}_linux_x64.tar.gz" \
+          | tar -xz -C /tmp/gitleaks gitleaks
+        CONFIG_ARGS=()
+        [ -f .gitleaks.toml ] && CONFIG_ARGS=(--config .gitleaks.toml)
+        # exit code 1 = утечки найдены; статус решает fail-политика стадии
+        /tmp/gitleaks/gitleaks detect --source . \
+          --report-format sarif --report-path "$SARIF_PATH" \
+          --redact "${CONFIG_ARGS[@]}" --exit-code 1

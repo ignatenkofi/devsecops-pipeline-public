@@ -1,0 +1,36 @@
+name: semgrep
+description: >-
+  Стадия sast-semgrep: Semgrep с offline-правилами из rules/ этого же
+  репозитория (в интернет за правилами не ходим — ADR про честный SAST:
+  intra-file taint-паттерны, версия пинована). Суппрессии — у потребителя
+  в .semgrepignore / nosemgrep.
+inputs:
+  sarif-path:
+    required: false
+    default: sarif/semgrep.sarif
+  version:
+    required: false
+    default: "1.86.0"
+  severity-floor:
+    description: "минимальная severity для ненулевого exit: ERROR|WARNING"
+    required: false
+    default: "ERROR"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SG_VERSION: ${{ inputs.version }}
+        SARIF_PATH: ${{ inputs.sarif-path }}
+        FLOOR: ${{ inputs.severity-floor }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "$SARIF_PATH")"
+        python3 -m pip install --quiet "semgrep==${SG_VERSION}"
+        SEVERITY_ARGS=()
+        [ "$FLOOR" = "ERROR" ] && SEVERITY_ARGS=(--severity ERROR)
+        # --error: ненулевой exit при находках; статус решает fail-политика
+        semgrep scan --metrics=off --error \
+          --config "${GITHUB_ACTION_PATH}/rules" \
+          "${SEVERITY_ARGS[@]}" \
+          --sarif --output "$SARIF_PATH" .

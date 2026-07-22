@@ -1,0 +1,16 @@
+# Класс: библиотека/инструмент (docshelf-mcp, sqst-tools, domain-tools, ...)
+# Режимы: B blocking · A advisory · R только на release · off не запускается.
+# Матрица — из ARCHITECTURE «Репо-класс × стадии»; исполняются реализованные
+# стадии (M0: secrets, sast-semgrep, sca), остальные ждут своих фаз.
+class: library
+stages:
+  secrets: B
+  pii-gate: A        # M2 (после доставки pattern packs pii-mcp)
+  sast-semgrep: B
+  sast-sonar: B      # M1 (полигон)
+  sca: B
+  docs-lint: A       # M1
+  course-lint: "off"
+  container: A       # M1 (если есть Dockerfile)
+  sbom: R            # M1
+  dast: "off"

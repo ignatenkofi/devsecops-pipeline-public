@@ -1,0 +1,15 @@
+# Класс: полка документов (homelab-shelf, sqst-memshelf, arch-designs-shelf,
+# unevie-shelf). Кода почти нет; главная стадия — pii-gate (наследие
+# PII-политики 2026-06-10: PII-free by design).
+class: docs-shelf
+stages:
+  secrets: B
+  pii-gate: B        # M2; стартовый режим advisory на 2 недели калибровки
+  sast-semgrep: "off"
+  sast-sonar: "off"
+  sca: "off"
+  docs-lint: B       # M1
+  course-lint: "off"
+  container: "off"
+  sbom: "off"
+  dast: "off"

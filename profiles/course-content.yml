@@ -1,0 +1,14 @@
+# Класс: контент курса (sqst-core, msa-hl-course). Примеры кода уроков —
+# advisory (учебный код намеренно неидеален); границы CE охраняет course-lint.
+class: course-content
+stages:
+  secrets: B
+  pii-gate: B        # M2
+  sast-semgrep: A
+  sast-sonar: A      # M1 (github_project L4–L15)
+  sca: A
+  docs-lint: A       # M1
+  course-lint: B     # M1 (обёртка sqst lint --strict)
+  container: "off"
+  sbom: "off"
+  dast: "off"
