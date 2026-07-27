@@ -1,0 +1,217 @@
+name: nightly-bump
+# M1 (#8 приватного репо): пины инструментов (gitleaks / semgrep / osv-scanner)
+# дрейфуют от апстрима — обновление должно быть рутиной, не подвигом.
+# Ночной прогон: снять свежие версии → провалидировать их на тех же
+# негатив-фикстурах, что и selftest, ДО правки пинов → ветка bump/tools + PR.
+#
+# Два честных ограничения:
+# 1. PR, созданный GITHUB_TOKEN'ом, НЕ запускает selftest автоматически
+#    (защита GitHub от рекурсии). Поэтому валидация новых версий выполняется
+#    прямо в этом job'е, а ссылка на прогон кладётся в тело PR. Перед мержем
+#    selftest можно дёрнуть вручную (re-run на PR / пустой коммит).
+# 2. Крон-время дрейфует: заявленные 02:43 реально стреляют позже
+#    (история прогонов workflow — единственный источник правды).
+#
+# Политика мержа (тот же #8): минорные бампы владелец мержит пачкой;
+# мажорные — только с разбором changelog апстрима. Тег v1 двигается
+# отдельно и только после зелёного selftest (ADR 0006).
+
+on:
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency: nightly-bump
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Текущие пины и свежие версии апстрима
+        id: versions
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > /tmp/versions.env
+          import json, re, urllib.request
+
+          def pin(path):
+              text = open(path, encoding="utf-8").read()
+              m = re.search(r'version:\s*\n\s+required:.*\n\s+default:\s*"([0-9.]+)"', text)
+              if not m:
+                  raise SystemExit(f"{path}: не нашёл пин version.default")
+              return m.group(1)
+
+          def gh_latest(repo):
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/releases/latest",
+                  headers={"Accept": "application/vnd.github+json"})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)["tag_name"].lstrip("v")
+
+          def pypi_latest(pkg):
+              with urllib.request.urlopen(
+                      f"https://pypi.org/pypi/{pkg}/json", timeout=30) as r:
+                  return json.load(r)["info"]["version"]
+
+          tools = {
+              "gitleaks": (pin("actions/gitleaks/action.yml"),
+                           gh_latest("gitleaks/gitleaks")),
+              "semgrep": (pin("actions/semgrep/action.yml"),
+                          pypi_latest("semgrep")),
+              "osv": (pin("actions/osv-scanner/action.yml"),
+                      gh_latest("google/osv-scanner")),
+          }
+          stale = {t: v for t, v in tools.items() if v[0] != v[1]}
+          major = any(v[0].split(".")[0] != v[1].split(".")[0] for v in stale.values())
+          for t, (cur, new) in tools.items():
+              print(f"{t.upper()}_CUR={cur}")
+              print(f"{t.upper()}_NEW={new}")
+          print(f"NEEDS_BUMP={'true' if stale else 'false'}")
+          print(f"HAS_MAJOR={'true' if major else 'false'}")
+          PY
+          cat /tmp/versions.env >> "$GITHUB_OUTPUT"
+          cat /tmp/versions.env
+
+      - name: Всё свежее — выходим
+        if: steps.versions.outputs.NEEDS_BUMP == 'false'
+        run: echo "::notice::пины совпадают с апстримом — обновлять нечего"
+
+      # ── Валидация НОВЫХ версий на негатив-фикстурах (до правки пинов) ──
+      # Та же логика, что в selftest: новые версии обязаны по-прежнему
+      # ловить эталонные находки. Фикстуры собираются в рантайме — в
+      # исходниках репо секрето-подобных строк нет (даже фейковых).
+
+      - name: "Валидация: новый gitleaks находит синтетический секрет"
+        if: steps.versions.outputs.NEEDS_BUMP == 'true'
+        run: |
+          set -euo pipefail
+          V="${{ steps.versions.outputs.GITLEAKS_NEW }}"
+          mkdir -p /tmp/gitleaks-new /tmp/leaky
+          curl -sfL "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz" \
+            | tar -xz -C /tmp/gitleaks-new gitleaks
+          printf 'aws_access_key_id = %s%s\naws_secret_access_key = %s%s\n' \
+            "AKIA" "IOSFODNN7EXAMPLE" \
+            "wJalrXUtnFEMI/K7MDENG/" "bPxRfiCYEXAMPLEKEY" > /tmp/leaky/creds.txt
+          if /tmp/gitleaks-new/gitleaks detect --no-git --source /tmp/leaky --exit-code 1; then
+            echo "::error::gitleaks ${V} не нашёл синтетический секрет"; exit 1
+          fi
+          echo "gitleaks ${V}: негатив ок"
+
+      - name: "Валидация: новый semgrep парсит правила и ловит eval()"
+        if: steps.versions.outputs.NEEDS_BUMP == 'true'
+        run: |
+          set -euo pipefail
+          V="${{ steps.versions.outputs.SEMGREP_NEW }}"
+          python3 -m pip install --quiet "semgrep==${V}"
+          mkdir -p /tmp/vuln
+          printf 'user_input = input()\nresult = eval(user_input)\n' > /tmp/vuln/bad.py
+          if semgrep scan --metrics=off --error --config actions/semgrep/rules /tmp/vuln; then
+            echo "::error::semgrep ${V} не поймал eval()"; exit 1
+          fi
+          echo "semgrep ${V}: правила парсятся, негатив ок"
+
+      - name: "Валидация: новый osv-scanner находит известную уязвимость"
+        if: steps.versions.outputs.NEEDS_BUMP == 'true'
+        run: |
+          set -euo pipefail
+          V="${{ steps.versions.outputs.OSV_NEW }}"
+          mkdir -p /tmp/osv-new /tmp/osv-fixture
+          curl -sfL -o /tmp/osv-new/osv-scanner \
+            "https://github.com/google/osv-scanner/releases/download/v${V}/osv-scanner_linux_amd64"
+          chmod +x /tmp/osv-new/osv-scanner
+          # jinja2 2.10 несёт давно опубликованные CVE — эталонная находка
+          # в живой базе OSV (sca и в проде бьётся в живую базу).
+          printf 'jinja2==2.10\n' > /tmp/osv-fixture/requirements.txt
+          set +e
+          /tmp/osv-new/osv-scanner scan --recursive /tmp/osv-fixture
+          rc=$?
+          set -e
+          if [ "$rc" != "1" ]; then
+            echo "::error::osv-scanner ${V}: ожидал rc=1 на jinja2==2.10, получил rc=${rc}"
+            exit 1
+          fi
+          echo "osv-scanner ${V}: негатив ок"
+
+      - name: Обновить пины в actions/*/action.yml
+        if: steps.versions.outputs.NEEDS_BUMP == 'true'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+
+          BUMPS = {
+              "actions/gitleaks/action.yml": "${{ steps.versions.outputs.GITLEAKS_NEW }}",
+              "actions/semgrep/action.yml": "${{ steps.versions.outputs.SEMGREP_NEW }}",
+              "actions/osv-scanner/action.yml": "${{ steps.versions.outputs.OSV_NEW }}",
+          }
+          for path, new in BUMPS.items():
+              text = open(path, encoding="utf-8").read()
+              updated, n = re.subn(
+                  r'(version:\s*\n\s+required:.*\n\s+default:\s*")[0-9.]+(")',
+                  rf"\g<1>{new}\g<2>", text)
+              if n != 1:
+                  raise SystemExit(f"{path}: ожидал ровно один пин, нашёл {n}")
+              open(path, "w", encoding="utf-8").write(updated)
+              print(f"{path} -> {new}")
+          PY
+          git diff --stat
+
+      - name: Ветка bump/tools + PR
+        if: steps.versions.outputs.NEEDS_BUMP == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "nightly-bump"
+          git config user.email "nightly-bump@users.noreply.github.com"
+          git checkout -B bump/tools
+          git add actions/
+          if git diff --cached --quiet; then
+            echo "::notice::диф пуст (гонка с уже смерженным бампом?) — выходим"
+            exit 0
+          fi
+          git commit -m "chore: bump пинов инструментов (nightly)"
+          # Ветка стабильная: повторные ночи обновляют тот же PR, а не плодят новые.
+          git push -f origin bump/tools
+
+          MAJOR_NOTE=""
+          TITLE="chore: bump пинов инструментов (nightly)"
+          if [ "${{ steps.versions.outputs.HAS_MAJOR }}" = "true" ]; then
+            TITLE="chore: MAJOR bump пинов инструментов (nightly)"
+            MAJOR_NOTE="**Есть мажорный бамп — перед мержем разобрать changelog апстрима.**"
+          fi
+
+          BODY=$(cat <<EOF
+          Ночное самообновление пинов (#8 приватного репо).
+
+          | Инструмент | Было | Стало |
+          |---|---|---|
+          | gitleaks | ${{ steps.versions.outputs.GITLEAKS_CUR }} | ${{ steps.versions.outputs.GITLEAKS_NEW }} |
+          | semgrep | ${{ steps.versions.outputs.SEMGREP_CUR }} | ${{ steps.versions.outputs.SEMGREP_NEW }} |
+          | osv-scanner | ${{ steps.versions.outputs.OSV_CUR }} | ${{ steps.versions.outputs.OSV_NEW }} |
+
+          Новые версии прогнаны на негатив-фикстурах ДО правки пинов —
+          эталонные находки ловятся: [прогон](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}).
+
+          ${MAJOR_NOTE}
+
+          Политика: минорные бампы мержатся пачкой; мажорные — с разбором
+          changelog. selftest на этом PR сам не стартует (PR создан
+          GITHUB_TOKEN'ом) — при желании дёрнуть вручную. Тег v1 двигается
+          только после зелёного selftest (ADR 0006).
+          EOF
+          )
+
+          EXISTING=$(gh pr list --head bump/tools --state open --json number --jq 'length')
+          if [ "$EXISTING" = "0" ]; then
+            gh pr create --title "$TITLE" --body "$BODY" --base main --head bump/tools
+          else
+            gh pr edit bump/tools --title "$TITLE" --body "$BODY"
+            echo "::notice::PR уже открыт — обновлён"
+          fi

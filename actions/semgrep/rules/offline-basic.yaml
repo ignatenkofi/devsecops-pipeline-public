@@ -1,6 +1,9 @@
-# Стартовый offline-набор (M0): универсальные правила уровня ERROR.
-# Расширение набора — задача M1 (nightly-триггер обновляет и прогоняет
-# на fixtures). Правила намеренно консервативные: мало ложных срабатываний.
+# Offline-набор: универсальные правила уровня ERROR.
+# M0 — базовые синки (eval/shell/yaml). M1 (#8) — intra-file паттерны
+# path traversal и SSRF: только прямой поток «user input → sink» в одном
+# выражении, без межпроцедурного анализа — мы честно НЕ taint-движок
+# (см. «Границы честности» в README). Правила намеренно консервативные:
+# мало ложных срабатываний важнее полноты.
 rules:
   - id: py-eval-usage
     languages: [python]
@@ -41,3 +44,53 @@ rules:
       - pattern-either:
           - pattern: $CP.exec($A + $B, ...)
           - pattern: $CP.exec(`...${$X}...`, ...)
+
+  # ── M1: intra-file path traversal / SSRF (#8) ──────────────────────────
+  # Ловим только прямую передачу request-параметра в sink одним выражением:
+  # это единственный случай, который честно доказуем без taint-анализа.
+
+  - id: py-open-request-path
+    languages: [python]
+    severity: ERROR
+    message: путь из request.* напрямую в open()/send_file — path traversal; нормализуйте путь и проверяйте принадлежность базовому каталогу.
+    pattern-either:
+      - pattern: open(request.$W[...], ...)
+      - pattern: open(request.$W.get(...), ...)
+      - pattern: open(flask.request.$W[...], ...)
+      - pattern: send_file(request.$W[...], ...)
+      - pattern: send_file(request.$W.get(...), ...)
+      - pattern: flask.send_file(request.$W[...], ...)
+
+  - id: py-requests-request-url
+    languages: [python]
+    severity: ERROR
+    message: URL из request.* напрямую в HTTP-клиент — SSRF; валидируйте по allowlist хостов/схем.
+    pattern-either:
+      - pattern: requests.$F(request.$W[...], ...)
+      - pattern: requests.$F(request.$W.get(...), ...)
+      - pattern: urllib.request.urlopen(request.$W[...], ...)
+      - pattern: urllib.request.urlopen(request.$W.get(...), ...)
+
+  - id: js-fs-request-path
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: путь из req.query/req.params напрямую в fs/sendFile — path traversal; нормализуйте и проверяйте базовый каталог.
+    pattern-either:
+      - pattern: $FS.readFile(req.query.$X, ...)
+      - pattern: $FS.readFileSync(req.query.$X, ...)
+      - pattern: $FS.createReadStream(req.query.$X, ...)
+      - pattern: $FS.readFile(req.params.$X, ...)
+      - pattern: $FS.readFileSync(req.params.$X, ...)
+      - pattern: $FS.createReadStream(req.params.$X, ...)
+      - pattern: $RES.sendFile(req.query.$X, ...)
+      - pattern: $RES.sendFile(req.params.$X, ...)
+
+  - id: js-fetch-request-url
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: URL из req.query/req.params напрямую в fetch/axios — SSRF; валидируйте по allowlist хостов/схем.
+    pattern-either:
+      - pattern: fetch(req.query.$X, ...)
+      - pattern: fetch(req.params.$X, ...)
+      - pattern: axios.$M(req.query.$X, ...)
+      - pattern: axios.$M(req.params.$X, ...)

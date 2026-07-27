@@ -119,6 +119,57 @@ jobs:
           fi
           echo "негатив ок: eval() пойман"
 
+      - name: "Негатив: M1-правила ловят path traversal и SSRF (py+js)"
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/vuln-m1
+          cat > /tmp/vuln-m1/traversal.py <<'FIX'
+          from flask import request, send_file
+          import requests
+
+          def download():
+              return open(request.args["path"]).read()
+
+          def proxy():
+              return requests.get(request.args["url"]).text
+          FIX
+          cat > /tmp/vuln-m1/traversal.js <<'FIX'
+          function handler(req, res) {
+            const data = fs.readFileSync(req.query.file);
+            fetch(req.query.url);
+            res.send(data);
+          }
+          FIX
+          out=$(semgrep scan --metrics=off --json --config actions/semgrep/rules /tmp/vuln-m1 || true)
+          for rule in py-open-request-path py-requests-request-url \
+                      js-fs-request-path js-fetch-request-url; do
+            if ! printf '%s' "$out" | grep -q "$rule"; then
+              echo "::error::правило $rule не сработало на эталонной фикстуре"; exit 1
+            fi
+          done
+          echo "негатив ок: все четыре M1-правила ловят эталонные находки"
+
+      - name: "Позитив: M1-правила молчат на безопасных аналогах"
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/safe-m1
+          cat > /tmp/safe-m1/safe.py <<'FIX'
+          import os, requests
+          from flask import request, send_file
+
+          ALLOWED = {"report": "/srv/files/report.pdf"}
+
+          def download():
+              return open(ALLOWED[request.args["name"]]).read()
+
+          def fixed_fetch():
+              return requests.get("https://api.example.com/status").text
+          FIX
+          if ! semgrep scan --metrics=off --error --config actions/semgrep/rules /tmp/safe-m1; then
+            echo "::error::M1-правила дали ложное срабатывание на безопасном коде"; exit 1
+          fi
+          echo "позитив ок: ложных срабатываний нет"
+
       - name: Отчёт
         if: always()
         uses: ./actions/sarif-report
