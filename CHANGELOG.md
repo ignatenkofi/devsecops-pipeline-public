@@ -6,6 +6,19 @@ selftest). Формат — [Keep a Changelog], версии — semver.
 ## [Unreleased]
 
 ### Added
+- **Nightly-самообновление пинов** (`nightly-bump.yml`, приватный #8):
+  ночной workflow сверяет пины gitleaks/semgrep/osv-scanner с апстримом
+  (GitHub Releases / PyPI), валидирует новые версии на негатив-фикстурах
+  selftest ДО правки пинов и открывает/обновляет PR `bump/tools` с таблицей
+  «было → стало». Политика: минорные — пачкой, мажорные — с разбором
+  changelog (README «Версионирование»).
+- **M1-правила offline-набора semgrep** (приватный #8): intra-file path
+  traversal (`py-open-request-path`, `js-fs-request-path`) и SSRF
+  (`py-requests-request-url`, `js-fetch-request-url`) — только прямой поток
+  «request-параметр → sink» одним выражением, без претензии на taint-анализ
+  («Границы честности»). Selftest дополнен негатив-фикстурами на все четыре
+  правила и позитивом на безопасных аналогах (allowlist-маппинг, статический
+  URL) — ложных срабатываний нет.
 - Класс `vuln-demo` — намеренно уязвимое демо (sqst-vulnerable-app): все
   лёгкие стадии advisory (в т.ч. secrets), витрина находок без блокировок.
   Санкционированное исключение из инварианта «secrets = B» в selftest.
