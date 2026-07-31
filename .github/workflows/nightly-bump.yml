@@ -1,20 +1,25 @@
 name: nightly-bump
 # M1 (#8 приватного репо): пины инструментов (gitleaks / semgrep / osv-scanner)
 # дрейфуют от апстрима — обновление должно быть рутиной, не подвигом.
-# Ночной прогон: снять свежие версии → провалидировать их на тех же
-# негатив-фикстурах, что и selftest, ДО правки пинов → ветка bump/tools + PR.
+# Ночной прогон: снять свежие версии → провалидировать кандидата на негатив-
+# фикстурах и прогнать сами composite actions ДО правки пинов → ветка
+# bump/tools + PR.
 #
-# Два честных ограничения:
+# Три честных ограничения:
 # 1. PR, созданный GITHUB_TOKEN'ом, НЕ запускает selftest автоматически
-#    (защита GitHub от рекурсии). Поэтому валидация новых версий выполняется
-#    прямо в этом job'е, а ссылка на прогон кладётся в тело PR. Перед мержем
-#    selftest можно дёрнуть вручную (re-run на PR / пустой коммит).
-# 2. Крон-время дрейфует: заявленные 02:43 реально стреляют позже
-#    (история прогонов workflow — единственный источник правды).
+#    (защита GitHub от рекурсии). Поэтому валидация выполняется прямо в этом
+#    job'е, а ссылка на прогон кладётся в тело PR. Перед мержем selftest можно
+#    дёрнуть вручную (re-run на PR / пустой коммит).
+# 2. Крон-время дрейфует: заявленные 02:43 реально стреляют около 05:30–05:50
+#    UTC (история прогонов workflow — единственный источник правды).
+# 3. Мажорные бампы job'ом НЕ применяются (см. ниже) — только сообщаются.
 #
-# Политика мержа (тот же #8): минорные бампы владелец мержит пачкой;
-# мажорные — только с разбором changelog апстрима. Тег v1 двигается
-# отдельно и только после зелёного selftest (ADR 0006).
+# Политика мержа (тот же #8): минорные бампы владелец мержит пачкой; мажорные
+# — только с разбором changelog апстрима. Раньше job складывал минор и мажор в
+# один PR: минорные обновления оказывались заложниками мажорного разбора, и
+# «мержится пачкой» не работало. Теперь применяются только не-мажорные бампы,
+# а мажорные уезжают в отдельную issue и ждут решения человека. Тег v1
+# двигается отдельно и только после зелёного selftest (ADR 0006).
 
 on:
   schedule:
@@ -24,8 +29,13 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write # признак живости: провал ночи обязан быть виден снаружи
 
 concurrency: nightly-bump
+
+env:
+  HEALTH_TITLE: "nightly-bump: ночной прогон падает"
+  MAJOR_TITLE: "nightly-bump: мажорный бамп ждёт разбора changelog"
 
 jobs:
   bump:
@@ -33,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Текущие пины и свежие версии апстрима
+      - name: Текущие пины, свежие версии апстрима, что применяем
         id: versions
         run: |
           set -euo pipefail
@@ -67,47 +77,49 @@ jobs:
               "osv": (pin("actions/osv-scanner/action.yml"),
                       gh_latest("google/osv-scanner")),
           }
-          stale = {t: v for t, v in tools.items() if v[0] != v[1]}
-          major = any(v[0].split(".")[0] != v[1].split(".")[0] for v in stale.values())
-          for t, (cur, new) in tools.items():
-              print(f"{t.upper()}_CUR={cur}")
-              print(f"{t.upper()}_NEW={new}")
-          print(f"NEEDS_BUMP={'true' if stale else 'false'}")
-          print(f"HAS_MAJOR={'true' if major else 'false'}")
+
+          # TARGET — то, что реально уедет в пины и во что упрётся валидация.
+          # Мажорный скачок остаётся на текущем пине: его разбирает человек.
+          # Когда бампа нет, TARGET равен текущему пину — и валидация всё равно
+          # прогоняется: ночь без бампа обязана доказать, что гарды на
+          # действующем пине по-прежнему держат.
+          majors, minors = [], []
+          for name, (cur, new) in tools.items():
+              is_major = cur.split(".")[0] != new.split(".")[0]
+              target = cur if (is_major or cur == new) else new
+              if cur != new:
+                  (majors if is_major else minors).append(f"{name} {cur} -> {new}")
+              print(f"{name.upper()}_CUR={cur}")
+              print(f"{name.upper()}_NEW={new}")
+              print(f"{name.upper()}_TARGET={target}")
+
+          print(f"NEEDS_BUMP={'true' if minors else 'false'}")
+          print(f"HAS_MAJOR={'true' if majors else 'false'}")
+          print(f"MINORS={'; '.join(minors)}")
+          print(f"MAJORS={'; '.join(majors)}")
           PY
           cat /tmp/versions.env >> "$GITHUB_OUTPUT"
           cat /tmp/versions.env
 
-      - name: Всё свежее — выходим
-        if: steps.versions.outputs.NEEDS_BUMP == 'false'
-        run: echo "::notice::пины совпадают с апстримом — обновлять нечего"
+      # ── Валидация кандидата ДО правки пинов ─────────────────────────────
+      # Прогоняется каждую ночь, даже когда бампать нечего: это одновременно
+      # проверка кандидата и доказательство, что негатив-фикстуры не протухли
+      # на действующем пине (ровно так протух прошлый гард — история в
+      # tests/negative/secret-fixtures.sh).
 
-      # ── Валидация НОВЫХ версий на негатив-фикстурах (до правки пинов) ──
-      # Та же логика, что в selftest: новые версии обязаны по-прежнему
-      # ловить эталонные находки. Фикстуры собираются в рантайме — в
-      # исходниках репо секрето-подобных строк нет (даже фейковых).
-
-      - name: "Валидация: новый gitleaks находит синтетический секрет"
-        if: steps.versions.outputs.NEEDS_BUMP == 'true'
+      - name: "Негатив: gitleaks TARGET ловит эталонные находки"
         run: |
           set -euo pipefail
-          V="${{ steps.versions.outputs.GITLEAKS_NEW }}"
-          mkdir -p /tmp/gitleaks-new /tmp/leaky
+          V="${{ steps.versions.outputs.GITLEAKS_TARGET }}"
+          mkdir -p /tmp/gitleaks-new
           curl -sfL "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz" \
             | tar -xz -C /tmp/gitleaks-new gitleaks
-          printf 'aws_access_key_id = %s%s\naws_secret_access_key = %s%s\n' \
-            "AKIA" "IOSFODNN7EXAMPLE" \
-            "wJalrXUtnFEMI/K7MDENG/" "bPxRfiCYEXAMPLEKEY" > /tmp/leaky/creds.txt
-          if /tmp/gitleaks-new/gitleaks detect --no-git --source /tmp/leaky --exit-code 1; then
-            echo "::error::gitleaks ${V} не нашёл синтетический секрет"; exit 1
-          fi
-          echo "gitleaks ${V}: негатив ок"
+          tests/negative/assert-gitleaks.sh /tmp/gitleaks-new/gitleaks "$V"
 
-      - name: "Валидация: новый semgrep парсит правила и ловит eval()"
-        if: steps.versions.outputs.NEEDS_BUMP == 'true'
+      - name: "Негатив: semgrep TARGET парсит правила и ловит eval()"
         run: |
           set -euo pipefail
-          V="${{ steps.versions.outputs.SEMGREP_NEW }}"
+          V="${{ steps.versions.outputs.SEMGREP_TARGET }}"
           python3 -m pip install --quiet "semgrep==${V}"
           mkdir -p /tmp/vuln
           printf 'user_input = input()\nresult = eval(user_input)\n' > /tmp/vuln/bad.py
@@ -116,11 +128,10 @@ jobs:
           fi
           echo "semgrep ${V}: правила парсятся, негатив ок"
 
-      - name: "Валидация: новый osv-scanner находит известную уязвимость"
-        if: steps.versions.outputs.NEEDS_BUMP == 'true'
+      - name: "Негатив: osv-scanner TARGET находит известную уязвимость"
         run: |
           set -euo pipefail
-          V="${{ steps.versions.outputs.OSV_NEW }}"
+          V="${{ steps.versions.outputs.OSV_TARGET }}"
           mkdir -p /tmp/osv-new /tmp/osv-fixture
           curl -sfL -o /tmp/osv-new/osv-scanner \
             "https://github.com/google/osv-scanner/releases/download/v${V}/osv-scanner_linux_amd64"
@@ -138,6 +149,36 @@ jobs:
           fi
           echo "osv-scanner ${V}: негатив ок"
 
+      # Прогон самих composite actions с версией-кандидатом. Негатив-фикстуры
+      # выше проверяют «инструмент всё ещё находит»; это проверяет «стадия всё
+      # ещё запускается» — то есть что новая версия не сменила имена команд,
+      # флаги или коды возврата, на которых стоят наши actions. Ровно этот
+      # класс поломок и приносят мажоры.
+
+      - name: "Стадия secrets запускается на версии-кандидате"
+        uses: ./actions/gitleaks
+        with:
+          version: ${{ steps.versions.outputs.GITLEAKS_TARGET }}
+          sarif-path: sarif/gitleaks-smoke.sarif
+
+      - name: "Стадия sast-semgrep запускается на версии-кандидате"
+        uses: ./actions/semgrep
+        with:
+          version: ${{ steps.versions.outputs.SEMGREP_TARGET }}
+          sarif-path: sarif/semgrep-smoke.sarif
+
+      - name: "Стадия sca запускается на версии-кандидате (лок-файлов нет — путь skip)"
+        uses: ./actions/osv-scanner
+        with:
+          version: ${{ steps.versions.outputs.OSV_TARGET }}
+          sarif-path: sarif/osv-smoke.sarif
+
+      # ── Применение ──────────────────────────────────────────────────────
+
+      - name: Бампать нечего
+        if: steps.versions.outputs.NEEDS_BUMP == 'false'
+        run: echo "::notice::не-мажорных обновлений нет; гарды на текущих пинах прогнаны и держат"
+
       - name: Обновить пины в actions/*/action.yml
         if: steps.versions.outputs.NEEDS_BUMP == 'true'
         run: |
@@ -146,9 +187,9 @@ jobs:
           import re
 
           BUMPS = {
-              "actions/gitleaks/action.yml": "${{ steps.versions.outputs.GITLEAKS_NEW }}",
-              "actions/semgrep/action.yml": "${{ steps.versions.outputs.SEMGREP_NEW }}",
-              "actions/osv-scanner/action.yml": "${{ steps.versions.outputs.OSV_NEW }}",
+              "actions/gitleaks/action.yml": "${{ steps.versions.outputs.GITLEAKS_TARGET }}",
+              "actions/semgrep/action.yml": "${{ steps.versions.outputs.SEMGREP_TARGET }}",
+              "actions/osv-scanner/action.yml": "${{ steps.versions.outputs.OSV_TARGET }}",
           }
           for path, new in BUMPS.items():
               text = open(path, encoding="utf-8").read()
@@ -180,38 +221,92 @@ jobs:
           # Ветка стабильная: повторные ночи обновляют тот же PR, а не плодят новые.
           git push -f origin bump/tools
 
-          MAJOR_NOTE=""
-          TITLE="chore: bump пинов инструментов (nightly)"
-          if [ "${{ steps.versions.outputs.HAS_MAJOR }}" = "true" ]; then
-            TITLE="chore: MAJOR bump пинов инструментов (nightly)"
-            MAJOR_NOTE="**Есть мажорный бамп — перед мержем разобрать changelog апстрима.**"
-          fi
-
           BODY=$(cat <<EOF
           Ночное самообновление пинов (#8 приватного репо).
 
           | Инструмент | Было | Стало |
           |---|---|---|
-          | gitleaks | ${{ steps.versions.outputs.GITLEAKS_CUR }} | ${{ steps.versions.outputs.GITLEAKS_NEW }} |
-          | semgrep | ${{ steps.versions.outputs.SEMGREP_CUR }} | ${{ steps.versions.outputs.SEMGREP_NEW }} |
-          | osv-scanner | ${{ steps.versions.outputs.OSV_CUR }} | ${{ steps.versions.outputs.OSV_NEW }} |
+          | gitleaks | ${{ steps.versions.outputs.GITLEAKS_CUR }} | ${{ steps.versions.outputs.GITLEAKS_TARGET }} |
+          | semgrep | ${{ steps.versions.outputs.SEMGREP_CUR }} | ${{ steps.versions.outputs.SEMGREP_TARGET }} |
+          | osv-scanner | ${{ steps.versions.outputs.OSV_CUR }} | ${{ steps.versions.outputs.OSV_TARGET }} |
 
-          Новые версии прогнаны на негатив-фикстурах ДО правки пинов —
-          эталонные находки ловятся: [прогон](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}).
+          Версии-кандидаты прогнаны ДО правки пинов: негатив-фикстуры ловятся
+          (\`tests/negative/\`) и сами стадии запускаются на новых версиях —
+          [прогон](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}).
 
-          ${MAJOR_NOTE}
+          Мажорные обновления сюда не попадают by design: они остаются на
+          текущем пине и ждут разбора changelog в отдельной issue.
 
-          Политика: минорные бампы мержатся пачкой; мажорные — с разбором
-          changelog. selftest на этом PR сам не стартует (PR создан
-          GITHUB_TOKEN'ом) — при желании дёрнуть вручную. Тег v1 двигается
-          только после зелёного selftest (ADR 0006).
+          selftest на этом PR сам не стартует (PR создан GITHUB_TOKEN'ом) —
+          при желании дёрнуть вручную. Тег v1 двигается только после зелёного
+          selftest (ADR 0006).
           EOF
           )
 
           EXISTING=$(gh pr list --head bump/tools --state open --json number --jq 'length')
           if [ "$EXISTING" = "0" ]; then
-            gh pr create --title "$TITLE" --body "$BODY" --base main --head bump/tools
+            gh pr create --title "chore: bump пинов инструментов (nightly)" \
+              --body "$BODY" --base main --head bump/tools
           else
-            gh pr edit bump/tools --title "$TITLE" --body "$BODY"
+            gh pr edit bump/tools --title "chore: bump пинов инструментов (nightly)" --body "$BODY"
             echo "::notice::PR уже открыт — обновлён"
           fi
+
+      # ── Признак живости ────────────────────────────────────────────────
+
+      - name: "Мажоры ждут разбора — завести или обновить issue"
+        if: steps.versions.outputs.HAS_MAJOR == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BODY=$(cat <<EOF
+          Ночной прогон обнаружил мажорные обновления. Job их **не применяет**:
+          мажор меняет поведение инструмента, а иногда и CLI, на который стоят
+          наши composite actions.
+
+          Ждут разбора: ${{ steps.versions.outputs.MAJORS }}
+
+          Что сделать: прочитать changelog апстрима, поднять пин руками в
+          \`actions/*/action.yml\`, прогнать selftest. Issue закроется сама,
+          когда пин догонит апстрим.
+
+          [Ночной прогон](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
+          EOF
+          )
+          .github/scripts/health-issue.sh open "$MAJOR_TITLE" "$BODY"
+
+      - name: "Мажоров нет — снять issue, если висела"
+        if: steps.versions.outputs.HAS_MAJOR == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .github/scripts/health-issue.sh close "$MAJOR_TITLE" \
+            "Мажорных расхождений с апстримом больше нет — закрыто ночным прогоном."
+
+      - name: "Прогон упал — сделать это видимым снаружи"
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BODY=$(cat <<EOF
+          Ночной прогон \`nightly-bump\` завершился неуспехом.
+
+          Пины инструментов не обновляются, пока это не починено — то есть
+          конвейер тихо стареет. Провалившийся scheduled-workflow сам о себе
+          не сообщает, поэтому issue заводится автоматически и закроется, когда
+          ночь снова станет зелёной.
+
+          [Упавший прогон](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
+          EOF
+          )
+          .github/scripts/health-issue.sh open "$HEALTH_TITLE" "$BODY"
+
+      - name: "Прогон зелёный — снять issue о падениях"
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .github/scripts/health-issue.sh close "$HEALTH_TITLE" \
+            "Ночной прогон снова зелёный — закрыто автоматически."
