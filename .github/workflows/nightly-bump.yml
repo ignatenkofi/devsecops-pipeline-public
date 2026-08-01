@@ -254,59 +254,45 @@ jobs:
 
       # ── Признак живости ────────────────────────────────────────────────
 
-      - name: "Мажоры ждут разбора — завести или обновить issue"
-        if: steps.versions.outputs.HAS_MAJOR == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          BODY=$(cat <<EOF
-          Ночной прогон обнаружил мажорные обновления. Job их **не применяет**:
-          мажор меняет поведение инструмента, а иногда и CLI, на который стоят
-          наши composite actions.
+      # Признак живости — через переиспользуемый action (devsecops-pipeline#19):
+      # у потребителей конвейера ровно та же потребность, и копипаста скрипта
+      # по репозиториям была бы третьей копией одной логики — тем самым, за что
+      # выше ругаются embedded-скрипты бэкапа.
 
-          Ждут разбора: ${{ steps.versions.outputs.MAJORS }}
+      - name: "Мажоры: завести issue или снять, если догнали апстрим"
+        uses: ./actions/health-issue
+        with:
+          state: ${{ steps.versions.outputs.HAS_MAJOR == 'true' && 'open' || 'close' }}
+          title: ${{ env.MAJOR_TITLE }}
+          token: ${{ github.token }}
+          close-comment: "Мажорных расхождений с апстримом больше нет — закрыто ночным прогоном."
+          body: |
+            Ночной прогон обнаружил мажорные обновления. Job их **не применяет**:
+            мажор меняет поведение инструмента, а иногда и CLI, на который стоят
+            наши composite actions.
 
-          Что сделать: прочитать changelog апстрима, поднять пин руками в
-          \`actions/*/action.yml\`, прогнать selftest. Issue закроется сама,
-          когда пин догонит апстрим.
+            Ждут разбора: ${{ steps.versions.outputs.MAJORS }}
 
-          [Ночной прогон](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
-          EOF
-          )
-          .github/scripts/health-issue.sh open "$MAJOR_TITLE" "$BODY"
+            Что сделать: прочитать changelog апстрима, поднять пин руками в
+            `actions/*/action.yml`, прогнать selftest. Issue закроется сама,
+            когда пин догонит апстрим.
 
-      - name: "Мажоров нет — снять issue, если висела"
-        if: steps.versions.outputs.HAS_MAJOR == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          .github/scripts/health-issue.sh close "$MAJOR_TITLE" \
-            "Мажорных расхождений с апстримом больше нет — закрыто ночным прогоном."
+            [Ночной прогон](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
-      - name: "Прогон упал — сделать это видимым снаружи"
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          BODY=$(cat <<EOF
-          Ночной прогон \`nightly-bump\` завершился неуспехом.
+      - name: "Итог ночи виден снаружи: падение заводит issue, зелёный снимает"
+        if: always()
+        uses: ./actions/health-issue
+        with:
+          state: ${{ job.status }}
+          title: ${{ env.HEALTH_TITLE }}
+          token: ${{ github.token }}
+          close-comment: "Ночной прогон снова зелёный — закрыто автоматически."
+          body: |
+            Ночной прогон `nightly-bump` завершился неуспехом.
 
-          Пины инструментов не обновляются, пока это не починено — то есть
-          конвейер тихо стареет. Провалившийся scheduled-workflow сам о себе
-          не сообщает, поэтому issue заводится автоматически и закроется, когда
-          ночь снова станет зелёной.
+            Пины инструментов не обновляются, пока это не починено — то есть
+            конвейер тихо стареет. Провалившийся scheduled-workflow сам о себе
+            не сообщает, поэтому issue заводится автоматически и закроется, когда
+            ночь снова станет зелёной.
 
-          [Упавший прогон](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
-          EOF
-          )
-          .github/scripts/health-issue.sh open "$HEALTH_TITLE" "$BODY"
-
-      - name: "Прогон зелёный — снять issue о падениях"
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          .github/scripts/health-issue.sh close "$HEALTH_TITLE" \
-            "Ночной прогон снова зелёный — закрыто автоматически."
+            [Упавший прогон](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
