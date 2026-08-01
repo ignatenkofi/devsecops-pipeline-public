@@ -94,20 +94,14 @@ jobs:
         with:
           sarif-path: sarif/osv.sarif
 
-      - name: "Негатив: gitleaks обязан найти синтетический секрет"
+      - name: "Негатив: gitleaks обязан найти эталонные секреты"
         run: |
           set -euo pipefail
-          mkdir -p /tmp/leaky
-          # фейковый ключ из документации AWS, собирается в рантайме из
-          # фрагментов — в исходниках репо нет ни одного цельного
-          # секрето-подобного токена (даже фейкового)
-          printf 'aws_access_key_id = %s%s\naws_secret_access_key = %s%s\n' \
-            "AKIA" "IOSFODNN7EXAMPLE" \
-            "wJalrXUtnFEMI/K7MDENG/" "bPxRfiCYEXAMPLEKEY" > /tmp/leaky/creds.txt
-          if /tmp/gitleaks/gitleaks detect --no-git --source /tmp/leaky --exit-code 1; then
-            echo "::error::gitleaks не нашёл синтетический секрет"; exit 1
-          fi
-          echo "негатив ок: секрет найден"
+          # Фикстуры и проверка — общие с nightly-bump (tests/negative/): пока
+          # они жили копипастой в двух воркфлоу, фикстура успела протухнуть в
+          # одном и не протухнуть в другом. Бинарь берётся тот, что распаковала
+          # позитив-стадия выше, то есть проверяется действующий пин.
+          tests/negative/assert-gitleaks.sh /tmp/gitleaks/gitleaks "действующий пин"
 
       - name: "Негатив: semgrep обязан поймать eval()"
         run: |
