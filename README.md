@@ -120,7 +120,7 @@ selftest дёргается вручную. Тег `v1` двигается от�
 .github/workflows/
   pipeline-light.yml   # переиспользуемый workflow (workflow_call) — точка входа
   selftest.yml         # CI самого репо: валидация профилей + позитив/негатив прогоны
-actions/               # composite actions, по одной на инструмент
+actions/               # composite actions: по одной на инструмент + health-issue
   gitleaks/ · semgrep/ (+rules/) · osv-scanner/ · sarif-report/ · profile-resolve/
 profiles/              # матрица класс × стадия (данные)
 examples/security.yml  # копипаст-адаптер для потребителя

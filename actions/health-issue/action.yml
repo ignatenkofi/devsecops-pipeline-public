@@ -1,0 +1,58 @@
+name: health-issue
+description: >-
+  Признак живости периодической джобы: отказ заводит issue, успех её
+  закрывает. Одна тема отказа = одна issue, идентификация по точному
+  заголовку — ночь за ночью обновляется комментарием, а не плодится.
+inputs:
+  state:
+    description: >-
+      Что случилось. Обычный вызов — `${{ job.status }}` из шага с
+      `if: always()`: тогда одна стадия закрывает обе ветки. Принимает
+      failure/success (синонимы open/close) и cancelled/skipped (no-op:
+      отмена — не отказ, и issue по ней приучала бы игнорировать сигнал).
+    required: true
+  title:
+    description: >-
+      Точный заголовок issue. Он же ключ идентификации, поэтому обязан быть
+      стабильным между прогонами и уникальным на тему отказа.
+    required: true
+  body:
+    description: Тело новой issue или комментария к существующей.
+    required: false
+    default: ""
+  close-comment:
+    description: Комментарий при закрытии; по умолчанию — обычная формулировка.
+    required: false
+    default: "Причина ушла — закрыто автоматически зелёным прогоном."
+  token:
+    description: >-
+      Токен с `issues: write`. `${{ github.token }}` подходит, когда джоба
+      живёт в том же репозитории, где должна появиться issue.
+    required: true
+  repository:
+    description: >-
+      Репозиторий issue в форме owner/repo. По умолчанию текущий; задаётся,
+      когда конвейер зовут из репозитория, где трекер не ведут.
+    required: false
+    default: ${{ github.repository }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        # GH_REPO обязателен: composite action исполняется в workspace
+        # потребителя, и `gh` иначе резолвит репозиторий по git remote
+        # рабочего каталога — не всегда тот, что нужен.
+        GH_TOKEN: ${{ inputs.token }}
+        GH_REPO: ${{ inputs.repository }}
+        STATE: ${{ inputs.state }}
+        TITLE: ${{ inputs.title }}
+        BODY: ${{ inputs.body }}
+        CLOSE_COMMENT: ${{ inputs.close-comment }}
+      run: |
+        set -euo pipefail
+        case "$STATE" in
+          success|close) text="$CLOSE_COMMENT" ;;
+          *)             text="$BODY" ;;
+        esac
+        "${{ github.action_path }}/health-issue.sh" "$STATE" "$TITLE" "$text"
