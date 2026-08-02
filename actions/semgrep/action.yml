@@ -10,7 +10,7 @@ inputs:
     default: sarif/semgrep.sarif
   version:
     required: false
-    default: "1.86.0"
+    default: "1.172.0"
   severity-floor:
     description: "минимальная severity для ненулевого exit: ERROR|WARNING"
     required: false

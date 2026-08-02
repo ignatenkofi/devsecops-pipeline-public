@@ -8,7 +8,7 @@ inputs:
     default: sarif/gitleaks.sarif
   version:
     required: false
-    default: "8.18.4"
+    default: "8.30.1"
 runs:
   using: composite
   steps:
