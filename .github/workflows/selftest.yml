@@ -139,13 +139,16 @@ jobs:
           mkdir -p /tmp/sca-fixture
           printf 'jinja2==2.10\n' > /tmp/sca-fixture/requirements.txt
 
+      # Отчёт кладётся ВНЕ sarif/: этот каталог собирает sarif-report в сводку
+      # прогона, и фикстурная находка стояла бы там рядом с настоящими. Таблица,
+      # в которой заведомо есть строка «так и надо», перестаёт читаться.
       - name: "Негатив: стадия sca на фикстуре обязана упасть и записать SARIF"
         id: sca_negative
         continue-on-error: true
         uses: ./actions/osv-scanner
         with:
           target: /tmp/sca-fixture
-          sarif-path: sarif/osv-negative.sarif
+          sarif-path: /tmp/sca-negative/osv.sarif
 
       - name: "Проверить исход негативного прогона стадии"
         run: |
@@ -160,7 +163,7 @@ jobs:
 
           EXPECTED = "GHSA-462w-v97r-4m45"
           try:
-              sarif = json.load(open("sarif/osv-negative.sarif", encoding="utf-8"))
+              sarif = json.load(open("/tmp/sca-negative/osv.sarif", encoding="utf-8"))
           except (OSError, json.JSONDecodeError) as exc:
               sys.exit(f"::error::стадия упала, но SARIF не прочитался ({exc}) — отчёт до потребителя не доедет")
           blob = json.dumps(sarif)
