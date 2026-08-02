@@ -120,6 +120,58 @@ jobs:
           # позитив-стадия выше, то есть проверяется действующий пин.
           tests/negative/assert-gitleaks.sh /tmp/gitleaks/gitleaks "действующий пин"
 
+      - name: "Негатив: osv-scanner обязан найти известную уязвимость"
+        run: |
+          set -euo pipefail
+          # До этого шага стадия sca проверялась в selftest только путём skip
+          # («лок-файлов нет»), то есть зелёный selftest не отличал рабочий
+          # сканер от сломанного: оба молчат. Бинарь берётся тот, что скачала
+          # позитив-стадия выше, — проверяется действующий пин, а гард общий с
+          # nightly-bump.
+          tests/negative/assert-osv.sh /tmp/osv/osv-scanner "действующий пин"
+
+      # Гард выше проверяет бинарь. Ниже — саму стадию: что наш вызов (форма
+      # команды, флаги, имя файла отчёта) доводит находку до SARIF. Разные
+      # вопросы: мажор 2.0 сломал бы именно вызов, оставив бинарь исправным.
+      - name: "Фикстура с заведомой уязвимостью для прогона стадии"
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sca-fixture
+          printf 'jinja2==2.10\n' > /tmp/sca-fixture/requirements.txt
+
+      - name: "Негатив: стадия sca на фикстуре обязана упасть и записать SARIF"
+        id: sca_negative
+        continue-on-error: true
+        uses: ./actions/osv-scanner
+        with:
+          target: /tmp/sca-fixture
+          sarif-path: sarif/osv-negative.sarif
+
+      - name: "Проверить исход негативного прогона стадии"
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.sca_negative.outcome }}" != "failure" ]; then
+            echo "::error::стадия sca на jinja2==2.10 не упала (outcome=${{ steps.sca_negative.outcome }}) — блокирующая стадия пропускает известную уязвимость"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import sys
+
+          EXPECTED = "GHSA-462w-v97r-4m45"
+          try:
+              sarif = json.load(open("sarif/osv-negative.sarif", encoding="utf-8"))
+          except (OSError, json.JSONDecodeError) as exc:
+              sys.exit(f"::error::стадия упала, но SARIF не прочитался ({exc}) — отчёт до потребителя не доедет")
+          blob = json.dumps(sarif)
+          if EXPECTED not in blob:
+              sys.exit(
+                  f"::error::стадия упала, но {EXPECTED} в SARIF нет. Падение без "
+                  "находки в отчёте — это красный гейт без объяснения причины."
+              )
+          print(f"негатив ок: стадия упала и {EXPECTED} доехал до SARIF")
+          PY
+
       - name: "Негатив: semgrep обязан поймать eval()"
         run: |
           set -euo pipefail

@@ -6,9 +6,16 @@ inputs:
   sarif-path:
     required: false
     default: sarif/osv.sarif
+  target:
+    description: >-
+      Директория для скана. По умолчанию корень репозитория; отдельным
+      значением пользуется selftest, чтобы прогнать стадию по фикстуре с
+      заведомой уязвимостью — путь «нашли» иначе не проверяется вовсе.
+    required: false
+    default: "."
   version:
     required: false
-    default: "1.8.5"
+    default: "2.4.0"
 runs:
   using: composite
   steps:
@@ -16,18 +23,47 @@ runs:
       env:
         OSV_VERSION: ${{ inputs.version }}
         SARIF_PATH: ${{ inputs.sarif-path }}
+        TARGET: ${{ inputs.target }}
       run: |
         set -euo pipefail
         mkdir -p "$(dirname "$SARIF_PATH")" /tmp/osv
         curl -sfL -o /tmp/osv/osv-scanner \
           "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
         chmod +x /tmp/osv/osv-scanner
+
+        # Форма команды разъехалась на мажоре 2.0, поэтому она выбирается по
+        # пину, а не зашита: пин — input, и откат на 1.x обязан оставаться
+        # рабочим одним значением, а не правкой этого файла.
+        #
+        # Что поменялось в 2.x и почему флаги именно такие:
+        #   * `scan` стал группой команд, канонический вход — `scan source`;
+        #   * `--output` переименован в `--output-file` (старый ещё
+        #     принимается, но с deprecation-предупреждением);
+        #   * резолвинг транзитивных зависимостей манифестов включён по
+        #     умолчанию и ходит в deps.dev. `--no-resolve` возвращает сетевой
+        #     профиль 1.x (только osv.dev): новый внешний хост в блокирующей
+        #     стадии — это расширение supply-chain-поверхности, и вводить его
+        #     молча, побочным эффектом бампа, нельзя;
+        #   * по умолчанию 2.x скрывает находки, помеченные unimportant и
+        #     uncalled. `--all-vulns` сохраняет контракт 1.x «показываем всё»:
+        #     апгрейд, после которого стадия молча находит меньше, — ровно тот
+        #     случай, когда отказ выглядит как успех.
+        # Обе опции консервативны и снимаются удалением флага, если владелец
+        # решит принять новые дефолты апстрима.
+        if [ "${OSV_VERSION%%.*}" -ge 2 ]; then
+          set -- scan source --recursive --no-resolve --all-vulns \
+                 --format sarif --output-file "$SARIF_PATH" "$TARGET"
+        else
+          set -- scan --recursive --format sarif --output "$SARIF_PATH" "$TARGET"
+        fi
+
         set +e
-        /tmp/osv/osv-scanner scan --recursive --format sarif --output "$SARIF_PATH" .
+        /tmp/osv/osv-scanner "$@"
         rc=$?
         set -e
         # exit-коды osv-scanner: 0 чисто; 1 найдены уязвимости;
         # 128 не найдено ни одного пакета/лок-файла — трактуем как skip.
+        # Проверено на 1.8.5 и 2.4.0: 128 на пустом каталоге сохранён.
         case "$rc" in
           0) echo "sca: чисто" ;;
           1) echo "::warning::sca: найдены уязвимости (см. SARIF)"; exit 1 ;;

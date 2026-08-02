@@ -132,22 +132,15 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ steps.versions.outputs.OSV_TARGET }}"
-          mkdir -p /tmp/osv-new /tmp/osv-fixture
+          mkdir -p /tmp/osv-new
           curl -sfL -o /tmp/osv-new/osv-scanner \
             "https://github.com/google/osv-scanner/releases/download/v${V}/osv-scanner_linux_amd64"
           chmod +x /tmp/osv-new/osv-scanner
-          # jinja2 2.10 несёт давно опубликованные CVE — эталонная находка
-          # в живой базе OSV (sca и в проде бьётся в живую базу).
-          printf 'jinja2==2.10\n' > /tmp/osv-fixture/requirements.txt
-          set +e
-          /tmp/osv-new/osv-scanner scan --recursive /tmp/osv-fixture
-          rc=$?
-          set -e
-          if [ "$rc" != "1" ]; then
-            echo "::error::osv-scanner ${V}: ожидал rc=1 на jinja2==2.10, получил rc=${rc}"
-            exit 1
-          fi
-          echo "osv-scanner ${V}: негатив ок"
+          # Гард общий с selftest (tests/negative/) — по той же причине, по
+          # которой туда переехала фикстура gitleaks: пока проверка жила
+          # копипастой в двух воркфлоу, она успела протухнуть в одном и не
+          # протухнуть в другом.
+          tests/negative/assert-osv.sh /tmp/osv-new/osv-scanner "$V"
 
       # Прогон самих composite actions с версией-кандидатом. Негатив-фикстуры
       # выше проверяют «инструмент всё ещё находит»; это проверяет «стадия всё
@@ -259,6 +252,72 @@ jobs:
       # по репозиториям была бы третьей копией одной логики — тем самым, за что
       # выше ругаются embedded-скрипты бэкапа.
 
+      # Мажор не применяется автоматически — но «разбери changelog» без единой
+      # цифры о самом кандидате перекладывает на человека и ту работу, которую
+      # машина делает за минуту. Гарды на мажорном кандидате прогоняются в
+      # advisory-режиме, и вердикт уезжает в тело issue: разбор начинается с
+      # «эталонная находка на месте / вот на чём падает», а не с нуля.
+      - name: "Мажоры: прогнать гарды на кандидате (advisory)"
+        id: major_probe
+        if: steps.versions.outputs.HAS_MAJOR == 'true'
+        env:
+          MAJORS: ${{ steps.versions.outputs.MAJORS }}
+        run: |
+          set -uo pipefail   # без -e: падение гарда здесь — это результат, а не отказ ночи
+          verdict=""
+          IFS=';' read -ra items <<< "$MAJORS"
+          for item in "${items[@]}"; do
+            tool=$(echo "$item" | awk '{print $1}')
+            new=$(echo "$item"  | awk '{print $NF}')
+            log=$(mktemp)
+            case "$tool" in
+              gitleaks)
+                mkdir -p /tmp/probe-gitleaks
+                if curl -sfL "https://github.com/gitleaks/gitleaks/releases/download/v${new}/gitleaks_${new}_linux_x64.tar.gz" \
+                     | tar -xz -C /tmp/probe-gitleaks gitleaks 2>>"$log"; then
+                  tests/negative/assert-gitleaks.sh /tmp/probe-gitleaks/gitleaks "$new" >>"$log" 2>&1
+                  rc=$?
+                else
+                  echo "не удалось скачать релиз" >>"$log"; rc=90
+                fi ;;
+              osv)
+                mkdir -p /tmp/probe-osv
+                if curl -sfL -o /tmp/probe-osv/osv-scanner \
+                     "https://github.com/google/osv-scanner/releases/download/v${new}/osv-scanner_linux_amd64" 2>>"$log"; then
+                  chmod +x /tmp/probe-osv/osv-scanner
+                  tests/negative/assert-osv.sh /tmp/probe-osv/osv-scanner "$new" >>"$log" 2>&1
+                  rc=$?
+                else
+                  echo "не удалось скачать релиз" >>"$log"; rc=90
+                fi ;;
+              semgrep)
+                if python3 -m pip install --quiet "semgrep==${new}" >>"$log" 2>&1; then
+                  mkdir -p /tmp/probe-vuln
+                  printf 'user_input = input()\nresult = eval(user_input)\n' > /tmp/probe-vuln/bad.py
+                  if semgrep scan --metrics=off --error --config actions/semgrep/rules /tmp/probe-vuln >>"$log" 2>&1; then
+                    echo "semgrep ${new} не поймал eval()" >>"$log"; rc=1
+                  else
+                    echo "semgrep ${new}: правила парсятся, негатив ок" >>"$log"; rc=0
+                  fi
+                else
+                  echo "не удалось установить пакет" >>"$log"; rc=90
+                fi ;;
+              *) echo "неизвестный инструмент" >>"$log"; rc=91 ;;
+            esac
+            if [ "$rc" = "0" ]; then
+              verdict="${verdict}- \`${tool} ${new}\`: гард прошёл — инструмент всё ещё находит эталонную находку."$'\n'
+            else
+              why=$(grep -m1 -E '::error::|не удалось|не поймал|неизвестный' "$log" | sed 's/::error:://' | cut -c1-300)
+              verdict="${verdict}- \`${tool} ${new}\`: **гард не прошёл** (rc=${rc}) — ${why:-см. лог прогона}"$'\n'
+            fi
+          done
+          {
+            echo "VERDICT<<PROBE_EOF"
+            printf '%s' "$verdict"
+            echo "PROBE_EOF"
+          } >> "$GITHUB_OUTPUT"
+          printf '%s' "$verdict"
+
       - name: "Мажоры: завести issue или снять, если догнали апстрим"
         uses: ./actions/health-issue
         with:
@@ -272,6 +331,16 @@ jobs:
             наши composite actions.
 
             Ждут разбора: ${{ steps.versions.outputs.MAJORS }}
+
+            Гарды, прогнанные на кандидате этой ночью (advisory — на результат
+            ночи не влияют):
+
+            ${{ steps.major_probe.outputs.VERDICT }}
+
+            Гард отвечает только на вопрос «инструмент всё ещё находит эталонную
+            находку». Зелёный гард **не** означает, что мажор безопасен: он не
+            видит смены дефолтов, формата отчёта и сетевого профиля — это и
+            остаётся предметом разбора changelog.
 
             Что сделать: прочитать changelog апстрима, поднять пин руками в
             `actions/*/action.yml`, прогнать selftest. Issue закроется сама,
