@@ -53,6 +53,20 @@ jobs:
       - name: "Признак живости: логика health-issue на заглушке gh"
         run: bash tests/health-issue/test-health-issue.sh
 
+      # Манифест композитного действия валидируется РАННЕРОМ при загрузке, а не
+      # линтером: actionlint проверяет воркфлоу и молчит про action.yml. Ночь
+      # 2026-08-02 показала цену — `${{ … }}` в описании входа сделало действие
+      # незагружаемым, и это выяснилось только на боевом ночном прогоне, где
+      # оно обязано было сообщить о падении. Шаг ниже загружает действие
+      # по-настоящему; `state: skipped` — штатный no-op, issue он не трогает,
+      # но манифест разбирается целиком.
+      - name: "health-issue: манифест загружается (no-op прогон)"
+        uses: ./actions/health-issue
+        with:
+          state: skipped
+          title: "selftest: манифест health-issue загружается"
+          token: ${{ github.token }}
+
       - name: actionlint (workflow-синтаксис)
         run: |
           curl -sfL https://github.com/rhysd/actionlint/releases/download/v1.7.1/actionlint_1.7.1_linux_amd64.tar.gz \
