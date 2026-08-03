@@ -12,15 +12,28 @@ inputs:
 runs:
   using: composite
   steps:
+    # Раньше здесь было `curl … | tar -xz`: артефакт не появлялся на диске,
+    # и сверять сумму было физически нечем (#24). Теперь загрузка идёт через
+    # fetch_verified.sh — качает в файл, сверяет sha256 с checksums.txt
+    # апстрима и только потом распаковывает.
+    #
+    # Соседний скрипт зовётся ПО ПУТИ, а не через `uses: ./actions/...`:
+    # локальный `uses:` внутри composite action резолвится относительно
+    # рабочего каталога ПОТРЕБИТЕЛЯ, а не репозитория action'а — в selftest
+    # это прошло бы, а у каждого потребителя сломалось. GITHUB_ACTION_PATH
+    # указывает внутрь выкачанного репо, поэтому сосед по `..` на месте.
     - shell: bash
       env:
         GL_VERSION: ${{ inputs.version }}
         SARIF_PATH: ${{ inputs.sarif-path }}
       run: |
         set -euo pipefail
-        mkdir -p "$(dirname "$SARIF_PATH")" /tmp/gitleaks
-        curl -sfL "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VERSION}/gitleaks_${GL_VERSION}_linux_x64.tar.gz" \
-          | tar -xz -C /tmp/gitleaks gitleaks
+        mkdir -p "$(dirname "$SARIF_PATH")"
+        base="https://github.com/gitleaks/gitleaks/releases/download/v${GL_VERSION}"
+        bash "${GITHUB_ACTION_PATH}/../fetch-verified/fetch_verified.sh" \
+          --url "${base}/gitleaks_${GL_VERSION}_linux_x64.tar.gz" \
+          --sums-url "${base}/gitleaks_${GL_VERSION}_checksums.txt" \
+          --dest /tmp/gitleaks --member gitleaks
         CONFIG_ARGS=()
         [ -f .gitleaks.toml ] && CONFIG_ARGS=(--config .gitleaks.toml)
         # exit code 1 = утечки найдены; статус решает fail-политика стадии

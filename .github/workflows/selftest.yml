@@ -67,10 +67,17 @@ jobs:
           title: "selftest: манифест health-issue загружается"
           token: ${{ github.token }}
 
+      - name: "Негатив: fetch-verified обязан отказать на несошедшейся сумме"
+        run: bash tests/negative/assert-fetch-verified.sh actions/fetch-verified/fetch_verified.sh
+
       - name: actionlint (workflow-синтаксис)
         run: |
-          curl -sfL https://github.com/rhysd/actionlint/releases/download/v1.7.1/actionlint_1.7.1_linux_amd64.tar.gz \
-            | tar -xz -C /tmp actionlint
+          set -euo pipefail
+          base=https://github.com/rhysd/actionlint/releases/download/v1.7.1
+          bash actions/fetch-verified/fetch_verified.sh \
+            --url "$base/actionlint_1.7.1_linux_amd64.tar.gz" \
+            --sums-url "$base/actionlint_1.7.1_checksums.txt" \
+            --dest /tmp --member actionlint
           /tmp/actionlint -color
 
   stages:

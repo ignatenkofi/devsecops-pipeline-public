@@ -1,0 +1,47 @@
+name: fetch-verified
+description: >-
+  Скачать релизный ассет апстрима, сверить sha256 с его файлом сумм и только
+  потом распаковать/сделать исполняемым. Одна копия логики на все стадии
+  обоих репо конвейера (#24). Отказ при расхождении суммы и при отсутствии
+  записи об ассете в файле сумм — оба случая роняют шаг.
+
+  Это обёртка для вызова ИЗ ВОРКФЛОУ (`uses: …/actions/fetch-verified@v1`).
+  Из другого composite action зови не её, а скрипт по пути
+  `${GITHUB_ACTION_PATH}/../fetch-verified/fetch_verified.sh`: локальный
+  `uses: ./…` внутри composite резолвится относительно рабочего каталога
+  ПОТРЕБИТЕЛЯ, а не репозитория action'а, — в selftest прошло бы, у
+  потребителя сломалось бы.
+inputs:
+  url:
+    description: "URL релизного ассета"
+    required: true
+  sums-url:
+    description: "URL файла контрольных сумм апстрима (строки `sha256  имя`)"
+    required: true
+  dest:
+    description: "каталог, куда положить результат"
+    required: true
+  member:
+    description: "имя файла внутри tar.gz — для архивов; взаимоисключающе с output"
+    required: false
+    default: ""
+  output:
+    description: "имя, под которым положить голый бинарь; взаимоисключающе с member"
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        FV_URL: ${{ inputs.url }}
+        FV_SUMS: ${{ inputs.sums-url }}
+        FV_DEST: ${{ inputs.dest }}
+        FV_MEMBER: ${{ inputs.member }}
+        FV_OUTPUT: ${{ inputs.output }}
+      run: |
+        set -euo pipefail
+        ARGS=(--url "$FV_URL" --sums-url "$FV_SUMS" --dest "$FV_DEST")
+        [ -n "$FV_MEMBER" ] && ARGS+=(--member "$FV_MEMBER")
+        [ -n "$FV_OUTPUT" ] && ARGS+=(--output "$FV_OUTPUT")
+        bash "${GITHUB_ACTION_PATH}/fetch_verified.sh" "${ARGS[@]}"
