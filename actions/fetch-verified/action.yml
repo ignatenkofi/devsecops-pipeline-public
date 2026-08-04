@@ -46,7 +46,7 @@ inputs:
   extract-all:
     description: "распаковать архив целиком (для вложенной раскладки); 'true' включает, взаимоисключающе с member/output"
     required: false
-    default: ""
+    default: "false"
 runs:
   using: composite
   steps:
@@ -66,5 +66,14 @@ runs:
         [ -n "$FV_SHA256" ] && ARGS+=(--sha256 "$FV_SHA256")
         [ -n "$FV_MEMBER" ] && ARGS+=(--member "$FV_MEMBER")
         [ -n "$FV_OUTPUT" ] && ARGS+=(--output "$FV_OUTPUT")
-        [ -n "$FV_EXTRACT_ALL" ] && ARGS+=(--extract-all)
+        # Булев вход сравнивается со строкой "true", а НЕ проверяется на
+        # непустоту: входы Actions приходят строками, и естественное
+        # `with: {extract-all: false}` даёт непустое "false". Проверка
+        # `-n` включала бы режим ровно там, где потребитель его выключает.
+        # Та же идиома, что у `check-links` в actions/docs-lint.
+        case "$FV_EXTRACT_ALL" in
+          true|True|TRUE) ARGS+=(--extract-all) ;;
+          ""|false|False|FALSE) ;;
+          *) echo "::error::fetch-verified: extract-all ждёт true|false, получено '$FV_EXTRACT_ALL'" >&2; exit 2 ;;
+        esac
         bash "${GITHUB_ACTION_PATH}/fetch_verified.sh" "${ARGS[@]}"

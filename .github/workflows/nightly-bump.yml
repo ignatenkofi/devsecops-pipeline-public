@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY' > /tmp/versions.env
-          import json, re, urllib.request
+          import json, re, sys, urllib.request
 
           def pin(path):
               text = open(path, encoding="utf-8").read()
@@ -83,8 +83,22 @@ jobs:
           # Когда бампа нет, TARGET равен текущему пину — и валидация всё равно
           # прогоняется: ночь без бампа обязана доказать, что гарды на
           # действующем пине по-прежнему держат.
+          def as_tuple(v):
+              return tuple(int(x) for x in re.findall(r"\d+", v))
+
           majors, minors = [], []
           for name, (cur, new) in tools.items():
+              # Монотонность проверяется отдельно: `releases/latest` у GitHub
+              # — самый свежий по ДАТЕ, а не по номеру, поэтому бэкпорт в
+              # старую ветку делает `new` ниже действующего пина. Без этой
+              # проверки такой релиз проходил бы как обычный минорный бамп и
+              # откатывал пин молча — а с версией теперь едет и пин суммы.
+              if as_tuple(new) < as_tuple(cur):
+                  print(f"::warning::{name}: latest={new} ниже пина {cur} "
+                        f"(бэкпорт в старую ветку?) — пин не трогаем",
+                        file=sys.stderr)
+                  new = cur
+                  tools[name] = (cur, new)
               is_major = cur.split(".")[0] != new.split(".")[0]
               target = cur if (is_major or cur == new) else new
               if cur != new:
@@ -204,10 +218,17 @@ jobs:
           version: ${{ steps.versions.outputs.SEMGREP_TARGET }}
           sarif-path: sarif/semgrep-smoke.sarif
 
+      # sha256 обязателен вместе с version: пин в action.yml описывает
+      # ДЕЙСТВУЮЩУЮ версию, а смоук гоняет кандидата. Передать одну версию
+      # без суммы — значит требовать от кандидата сумму предшественника:
+      # стадия честно откажется ставить бинарь, ночь упадёт здесь, и шаг
+      # переноса пина ниже станет недостижим. Ровно тот отказ, который
+      # выглядит как атака.
       - name: "Стадия sca запускается на версии-кандидате (лок-файлов нет — путь skip)"
         uses: ./actions/osv-scanner
         with:
           version: ${{ steps.versions.outputs.OSV_TARGET }}
+          sha256: ${{ steps.osv_validate.outputs.OSV_TARGET_SHA256 }}
           sarif-path: sarif/osv-smoke.sarif
 
       # ── Применение ──────────────────────────────────────────────────────

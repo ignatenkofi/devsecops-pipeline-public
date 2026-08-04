@@ -36,7 +36,17 @@ except ImportError:  # pragma: no cover - среда без pyyaml
 # Шаги, которые существуют ради разбора упавшего прогона. Если такой шаг
 # не первый — он обязан быть под always(), иначе исчезает вместе с тем
 # отказом, который объясняет.
-DIAGNOSTIC_MARKERS = ("actions/upload-artifact", "GITHUB_STEP_SUMMARY")
+#
+# `/actions/sarif-report` — не украшение списка: в обоих конвейерах
+# диагностику собирает именно он, а `upload-artifact` и запись в
+# `$GITHUB_STEP_SUMMARY` спрятаны ВНУТРЬ него. Детектор, знающий только
+# два первых маркера, пропустил бы снятие `if: always()` с реального
+# приёмника — то есть был бы слеп ровно к своему боевому случаю.
+DIAGNOSTIC_MARKERS = (
+    "actions/upload-artifact",
+    "GITHUB_STEP_SUMMARY",
+    "/actions/sarif-report",
+)
 
 
 def step_text(step: dict) -> str:
@@ -51,19 +61,32 @@ def always_guarded(step: dict) -> bool:
     return "always()" in cond
 
 
-def check_steps(where: str, steps: list, is_composite: bool) -> list[str]:
+def triggers(doc: dict) -> dict:
+    """Секция `on` воркфлоу.
+
+    YAML 1.1 разбирает голое `on:` как булев ключ True, поэтому одного
+    `doc.get("on")` мало: у половины воркфлоу ключ окажется под `True`.
+    """
+    for key in ("on", True):
+        value = doc.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def check_steps(where: str, steps: list, local_uses_forbidden: bool) -> list[str]:
     problems = []
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
             continue
         body = step_text(step)
 
-        if is_composite:
+        if local_uses_forbidden:
             uses = str(step.get("uses", ""))
             if uses.startswith("./") or uses.startswith("../"):
                 problems.append(
-                    f"{where}: шаг #{i + 1} зовёт локальный `uses: {uses}` внутри "
-                    f"composite — резолвится у потребителя, не здесь"
+                    f"{where}: шаг #{i + 1} зовёт локальный `uses: {uses}` — "
+                    f"резолвится относительно чекаута потребителя, не этого репо"
                 )
 
         # Первый шаг не может быть пропущен из-за отказа предыдущего:
@@ -86,15 +109,29 @@ def check_manifest(path: Path, text: str) -> list[str]:
     runs = doc.get("runs")
     if isinstance(runs, dict) and str(runs.get("using", "")) == "composite":
         steps = runs.get("steps") or []
-        problems += check_steps(str(path), steps, is_composite=True)
+        problems += check_steps(str(path), steps, local_uses_forbidden=True)
 
     jobs = doc.get("jobs")
     if isinstance(jobs, dict):
+        # Локальный `./` запрещён не только в composite: у переиспользуемого
+        # воркфлоу (`on: workflow_call`) он резолвится точно так же — против
+        # чекаута ВЫЗЫВАЮЩЕГО. У обычного воркфлоу этого репо (push/PR)
+        # `./` законен и постоянно используется, поэтому различаем по
+        # триггеру, а не по факту «это workflow».
+        reusable = "workflow_call" in triggers(doc)
         for name, job in jobs.items():
             if not isinstance(job, dict):
                 continue
+            if reusable:
+                uses = str(job.get("uses", ""))
+                if uses.startswith("./") or uses.startswith("../"):
+                    problems.append(
+                        f"{path} job:{name} зовёт локальный `uses: {uses}` из "
+                        f"переиспользуемого воркфлоу — резолвится у вызывающего"
+                    )
             steps = job.get("steps") or []
-            problems += check_steps(f"{path} job:{name}", steps, is_composite=False)
+            problems += check_steps(f"{path} job:{name}", steps,
+                                    local_uses_forbidden=reusable)
 
     return problems
 
@@ -138,11 +175,61 @@ runs:
         name: logs
 """
 
+# Голое `on:` — YAML 1.1 отдаёт его булевым ключом True. Фикстура написана
+# именно так специально: разбор триггеров обязан это переживать, иначе
+# правило для переиспользуемых воркфлоу молча не применится ни разу.
+BAD_REUSABLE_LOCAL_USES = """
+name: bad-reusable
+on:
+  workflow_call:
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./actions/scanner
+"""
+
+# Приёмник отчётов — не upload-artifact и не запись в summary: и то и
+# другое спрятано ВНУТРЬ composite. Снятие always() с этого шага детектор
+# обязан видеть.
+BAD_REPORT_STEP = """
+name: bad-report
+on:
+  workflow_call:
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: owner/repo/actions/sarif-report@v1
+"""
+
+# Обычный воркфлоу репозитория (push/PR) — `./` в нём законен и
+# используется постоянно. Ложное срабатывание здесь стоило бы дороже
+# пропуска: детектор, ругающийся на исправный selftest, отключат.
+GOOD_LOCAL_USES_IN_PLAIN_WORKFLOW = """
+name: selftest-like
+on:
+  pull_request:
+jobs:
+  smoke:
+    uses: ./.github/workflows/pipeline.yml
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./actions/scanner
+"""
+
 
 def self_test() -> None:
     cases = [
         ("локальный uses в composite", BAD_COMPOSITE_USES, "локальный `uses:"),
         ("диагностика без always()", BAD_DIAGNOSTIC_STEP, "без `if: always()`"),
+        ("локальный uses в переиспользуемом воркфлоу",
+         BAD_REUSABLE_LOCAL_USES, "локальный `uses:"),
+        ("приёмник отчётов без always()", BAD_REPORT_STEP, "без `if: always()`"),
     ]
     for name, fixture, needle in cases:
         found = check_manifest(Path(f"<фикстура {name}>"), fixture)
@@ -151,9 +238,12 @@ def self_test() -> None:
                 f"САМОПРОВЕРКА ПРОВАЛЕНА: детектор «{name}» не увидел нарушения "
                 f"в заведомо плохом манифесте. Нашёл: {found or 'ничего'}"
             )
-    clean = check_manifest(Path("<фикстура good>"), GOOD_MANIFEST)
-    if clean:
-        sys.exit(f"САМОПРОВЕРКА ПРОВАЛЕНА: детектор ругается на чистый манифест: {clean}")
+    for name, fixture in (("composite", GOOD_MANIFEST),
+                          ("обычный воркфлоу с ./", GOOD_LOCAL_USES_IN_PLAIN_WORKFLOW)):
+        clean = check_manifest(Path(f"<фикстура good {name}>"), fixture)
+        if clean:
+            sys.exit(f"САМОПРОВЕРКА ПРОВАЛЕНА: детектор ругается на чистый "
+                     f"манифест «{name}»: {clean}")
 
 
 def main() -> int:

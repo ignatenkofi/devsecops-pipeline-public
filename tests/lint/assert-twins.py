@@ -40,6 +40,7 @@ SHARED_SUFFIXES = (".py", ".sh")
 REQUIRED_IN_BOTH = (
     "actions/fetch-verified/fetch_verified.sh",
     "tests/negative/assert-fetch-verified.sh",
+    "tests/negative/assert-fetch-verified-wrapper.py",
     "tests/lint/assert-composite-hygiene.py",
     "tests/lint/assert-twins.py",
 )

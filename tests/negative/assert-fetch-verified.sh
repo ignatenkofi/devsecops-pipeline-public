@@ -32,6 +32,10 @@
 #                                 раскладка — lychee)
 #  12. --extract-all: НЕ сошлось  → отказ И КАТАЛОГ ПУСТ
 #  13. два режима установки сразу / ни одного → rc=2
+#  14. файл сумм ЗАГЛАВНЫМИ (PowerShell Get-FileHash, certutil) → сходится
+#  15. --member, которого в архиве нет → отказ, а не «успех с пустым dest»
+#  16. установлены ИМЕННО сверенные байты, а не скачанные повторно
+#  17. TLS не отключён: самоподписанный https обязан быть отвергнут
 set -euo pipefail
 
 FV="${1:-actions/fetch-verified/fetch_verified.sh}"
@@ -188,4 +192,118 @@ for bad_modes in "--member tool_linux_amd64 --output tool" \
   [ -z "$(ls -A "$WORK/modes" 2>/dev/null)" ] || fail "что-то установлено при наборе режимов '$bad_modes'"
 done
 
-echo "OK: fetch-verified ставит только сошедшееся — три режима установки, два источника суммы"
+# ------------------------------------------------------------------ 14
+# sha256sum печатает строчными, а файл сумм, перегенерированный на Windows
+# (Get-FileHash, certutil), приходит заглавными. Без нормализации регистра
+# нетронутый ассет отвергался бы как подменённый.
+printf '%s  tool_linux_amd64\n' "$(printf '%s' "$real_sum" | tr 'a-f' 'A-F')" > "$SRC/SUMS.upper"
+rc=0
+bash "$FV" --url "file://$SRC/tool_linux_amd64" --sums-url "file://$SRC/SUMS.upper" \
+  --dest "$WORK/upper" --output tool >"$WORK/upper.log" 2>&1 || rc=$?
+[ "$rc" -eq 0 ] || fail "сумма ЗАГЛАВНЫМИ отвергнута (rc=$rc): $(cat "$WORK/upper.log")"
+[ -x "$WORK/upper/tool" ] || fail "сумма заглавными сошлась, а бинарь не установлен"
+
+# ------------------------------------------------------------------ 15
+# Сумма сошлась, а установка провалилась — отдельный исход, и он обязан
+# быть отказом. Пока такого случая не было, снятие `set -e` в шапке
+# оставляло фикстуру зелёной: шаг печатал «распакован» при пустом dest.
+rc=0
+bash "$FV" --url "file://$SRC/tool.tar.gz" --sums-url "file://$SRC/SUMS.tar" \
+  --dest "$WORK/nomember" --member нет-такого-члена >"$WORK/nomember.log" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "отсутствующий член архива дал успех — провал установки не отличается от установки"
+[ -z "$(ls -A "$WORK/nomember" 2>/dev/null)" ] || fail "что-то установлено при отсутствующем члене"
+
+# ------------------------------------------------------------------ 16
+# Наружу обязаны уехать ИМЕННО сверенные байты. Сверить одну загрузку и
+# отдать другую — не выдумка: «качать сразу в dest, не копировать между
+# ФС» выглядит как безобидный рефактор, а сверка при этом остаётся на
+# месте и продолжает сверять первую загрузку.
+#
+# Сервер отдаёт разное содержимое на первый и последующие GET ассета.
+# Правильная реализация качает ассет один раз, поэтому установлен будет
+# первый вариант; повторная загрузка принесёт второй.
+cat > "$WORK/flip.py" <<'PY'
+import hashlib, http.server, socketserver
+FIRST = b'#!/bin/sh\necho verified-bytes\n'
+LATER = b'#!/bin/sh\necho SWAPPED\n'
+seen = {"n": 0}
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.endswith("/SUMS"):
+            body = (hashlib.sha256(FIRST).hexdigest() + "  asset\n").encode()
+        else:
+            seen["n"] += 1
+            body = FIRST if seen["n"] == 1 else LATER
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+srv = socketserver.TCPServer(("127.0.0.1", 0), H)
+print(srv.server_address[1], flush=True)
+srv.serve_forever()
+PY
+python3 "$WORK/flip.py" > "$WORK/flip.port" 2>"$WORK/flip.err" &
+flip_pid=$!
+trap 'kill "$flip_pid" 2>/dev/null || true; rm -rf "$WORK"' EXIT
+for _ in $(seq 1 50); do [ -s "$WORK/flip.port" ] && break; sleep 0.1; done
+port="$(head -1 "$WORK/flip.port")"
+[ -n "$port" ] || fail "сервер фикстуры не поднялся: $(cat "$WORK/flip.err")"
+rc=0
+bash "$FV" --url "http://127.0.0.1:$port/asset" --sums-url "http://127.0.0.1:$port/SUMS" \
+  --dest "$WORK/bytes" --output tool >"$WORK/bytes.log" 2>&1 || rc=$?
+[ "$rc" -eq 0 ] || fail "честная загрузка по http отвергнута (rc=$rc): $(cat "$WORK/bytes.log")"
+got="$("$WORK/bytes/tool")"
+[ "$got" = "verified-bytes" ] \
+  || fail "установлены НЕ сверенные байты (получено '$got') — сверка и установка смотрят на разные загрузки"
+
+# ------------------------------------------------------------------ 17
+# Проверка сертификата не имеет права быть отключённой: `-k` в curl —
+# правка на одну букву, которую делают «чтобы обойти TLS-инспектор», и
+# она молча снимает защиту транспорта. Все остальные случаи ходят по
+# file:// и такую правку не различают вовсе.
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORK/k.pem" -out "$WORK/c.pem" \
+  -days 1 -subj "/CN=127.0.0.1" >/dev/null 2>&1 || fail "не удалось сгенерировать сертификат"
+cat > "$WORK/tls.py" <<'PY'
+import http.server, socketserver, ssl, sys
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"whatever"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(sys.argv[1], sys.argv[2])
+srv = socketserver.TCPServer(("127.0.0.1", 0), H)
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+print(srv.server_address[1], flush=True)
+srv.serve_forever()
+PY
+python3 "$WORK/tls.py" "$WORK/c.pem" "$WORK/k.pem" > "$WORK/tls.port" 2>"$WORK/tls.err" &
+tls_pid=$!
+trap 'kill "$flip_pid" "$tls_pid" 2>/dev/null || true; rm -rf "$WORK"' EXIT
+for _ in $(seq 1 50); do [ -s "$WORK/tls.port" ] && break; sleep 0.1; done
+tls_port="$(head -1 "$WORK/tls.port")"
+[ -n "$tls_port" ] || fail "https-сервер фикстуры не поднялся: $(cat "$WORK/tls.err")"
+# Пин ОБЯЗАН совпадать с тем, что сервер отдаёт: иначе отказ пришёл бы от
+# несошедшейся суммы, и случай не различал бы «TLS проверен» и «TLS снят,
+# но сумма не та» — то есть был бы зелёным при снятом `-k`. Проверено
+# мутацией: первая версия этого случая ровно так и промолчала.
+tls_body_sum="$(printf 'whatever' | sha256sum | awk '{print $1}')"
+rc=0
+bash "$FV" --url "https://127.0.0.1:$tls_port/asset" --sha256 "$tls_body_sum" \
+  --dest "$WORK/tls" --output tool >"$WORK/tls.log" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "самоподписанный сертификат принят — проверка TLS отключена"
+[ ! -e "$WORK/tls/tool" ] || fail "файл установлен с недоверенного https"
+
+echo "OK: fetch-verified ставит только сверенные байты — 17 случаев, три режима, два источника суммы"
