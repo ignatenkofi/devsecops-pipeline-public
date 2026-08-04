@@ -16,18 +16,18 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p "$SARIF_DIR"
-        {
-          echo "## DevSecOps pipeline — сводка стадий"
-          echo ""
-          echo "| SARIF | находок |"
-          echo "|---|---|"
-          for f in "$SARIF_DIR"/*.sarif; do
-            [ -s "$f" ] || { echo "| $(basename "$f") | — (skip) |"; continue; }
-            n=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(sum(len(r.get('results',[])) for r in d.get('runs',[])))" "$f" 2>/dev/null || echo "?")
-            echo "| $(basename "$f") | $n |"
-          done
-        } >> "$GITHUB_STEP_SUMMARY"
+        # Сводка и гард читаемости — в summarize.py: нечитаемый SARIF раньше
+        # попадал в таблицу как "?" на зелёном прогоне, а пустой каталог —
+        # как "skip" (см. докстринг скрипта). Выход 1 = отчёт стадии не
+        # разбирается; сводка при этом всё равно дописана.
+        python3 "${GITHUB_ACTION_PATH}/summarize.py" \
+          --sarif-dir "$SARIF_DIR" --out "$GITHUB_STEP_SUMMARY"
+    # `if: always()` обязателен с тех пор, как шаг выше научился падать:
+    # шаги composite action по умолчанию не идут после отказа предыдущего,
+    # и артефакт с нечитаемым SARIF'ом не уехал бы ровно тогда, когда он
+    # нужен для разбора.
     - uses: actions/upload-artifact@v4
+      if: always()
       with:
         name: sarif-${{ github.run_id }}
         path: ${{ inputs.sarif-dir }}
