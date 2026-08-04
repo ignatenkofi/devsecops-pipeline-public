@@ -70,6 +70,12 @@ jobs:
       - name: "Негатив: fetch-verified обязан отказать на несошедшейся сумме"
         run: bash tests/negative/assert-fetch-verified.sh actions/fetch-verified/fetch_verified.sh
 
+      # Гард на ОБЁРТКУ, а не на её скрипт: сборка аргументов в action.yml
+      # не проверялась ничем, и булев вход, читавшийся как «непустая
+      # строка», прожил там ровно поэтому.
+      - name: "Негатив: обёртка fetch-verified соблюдает булев контракт"
+        run: python3 tests/negative/assert-fetch-verified-wrapper.py .
+
       - name: "Гигиена манифестов: локальный uses в composite, диагностика под always()"
         run: python3 tests/lint/assert-composite-hygiene.py .
 
