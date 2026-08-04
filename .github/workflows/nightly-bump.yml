@@ -111,9 +111,15 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ steps.versions.outputs.GITLEAKS_TARGET }}"
-          mkdir -p /tmp/gitleaks-new
-          curl -sfL "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz" \
-            | tar -xz -C /tmp/gitleaks-new gitleaks
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${V}"
+          # Кандидат качается тем же путём, что и боевой пин: у апстрима
+          # файл сумм есть для каждой версии, поэтому «это же всего лишь
+          # проба» не повод исполнять непроверенный бинарь — джоб несёт
+          # contents: write и issues: write.
+          bash actions/fetch-verified/fetch_verified.sh \
+            --url "${base}/gitleaks_${V}_linux_x64.tar.gz" \
+            --sums-url "${base}/gitleaks_${V}_checksums.txt" \
+            --dest /tmp/gitleaks-new --member gitleaks
           tests/negative/assert-gitleaks.sh /tmp/gitleaks-new/gitleaks "$V"
 
       - name: "Негатив: semgrep TARGET парсит правила и ловит eval()"
@@ -129,13 +135,51 @@ jobs:
           echo "semgrep ${V}: правила парсятся, негатив ок"
 
       - name: "Негатив: osv-scanner TARGET находит известную уязвимость"
+        id: osv_validate
         run: |
           set -euo pipefail
           V="${{ steps.versions.outputs.OSV_TARGET }}"
+          CUR="${{ steps.versions.outputs.OSV_CUR }}"
           mkdir -p /tmp/osv-new
+          # Единственная загрузка конвейера, которая идёт без сверки, и это
+          # осознанно: апстрим osv-scanner файла сумм не публикует (#13), а
+          # сумму КАНДИДАТА неоткуда взять заранее — пин в actions/ описывает
+          # действующую версию, а не ту, на которую мы только смотрим.
+          #
+          # Поэтому сумма здесь не проверяется, а УСТАНАВЛИВАЕТСЯ: шаг правки
+          # пинов ниже перенесёт её в action.yml вместе с версией. Без этого
+          # бамп версии оставил бы стадию с суммой от старого бинаря, и гард
+          # начал бы падать не по делу — отказ, который выглядит как атака,
+          # хуже отсутствия отказа.
           curl -sfL -o /tmp/osv-new/osv-scanner \
             "https://github.com/google/osv-scanner/releases/download/v${V}/osv-scanner_linux_amd64"
           chmod +x /tmp/osv-new/osv-scanner
+          osv_sum="$(sha256sum /tmp/osv-new/osv-scanner | awk '{print $1}')"
+
+          # Граница между «пин переезжает» и «пин сработал». Если версия НЕ
+          # менялась, а сумма другая — это подмена уже опубликованного
+          # ассета, то есть ровно то, ради чего пин и заведён. Автообновить
+          # его здесь значило бы отмывать находку: ночной job молча
+          # переписал бы пин и закрыл единственный сигнал.
+          pinned="$(python3 - <<'PY'
+          import re
+          text = open("actions/osv-scanner/action.yml", encoding="utf-8").read()
+          found = re.findall(r'default:\s*"([0-9a-f]{64})"', text)
+          if len(found) != 1:
+              raise SystemExit(f"ожидал ровно один пин sha256, нашёл {len(found)}")
+          print(found[0])
+          PY
+          )"
+          if [ "$V" = "$CUR" ] && [ "$osv_sum" != "$pinned" ]; then
+            echo "::error::osv-scanner ${V}: версия та же, а сумма ассета изменилась" >&2
+            echo "  в пине ${pinned}" >&2
+            echo "  скачано ${osv_sum}" >&2
+            echo "  Апстрим заменил уже опубликованный релиз либо загрузку подменили." >&2
+            echo "  Разбирать руками; пин здесь не обновляется намеренно." >&2
+            exit 1
+          fi
+          echo "OSV_TARGET_SHA256=${osv_sum}" >> "$GITHUB_OUTPUT"
+          echo "osv-scanner ${V}: sha256 ${osv_sum} (станет пином, если версия поедет)"
           # Гард общий с selftest (tests/negative/) — по той же причине, по
           # которой туда переехала фикстура gitleaks: пока проверка жила
           # копипастой в двух воркфлоу, она успела протухнуть в одном и не
@@ -193,6 +237,26 @@ jobs:
                   raise SystemExit(f"{path}: ожидал ровно один пин, нашёл {n}")
               open(path, "w", encoding="utf-8").write(updated)
               print(f"{path} -> {new}")
+
+          # Пин суммы osv-scanner переезжает ТОЛЬКО вместе с версией: у
+          # апстрима файла сумм нет (#13), и сумма — единственное, что
+          # отличает «вышел новый релиз» от «подменили старый». Совпали
+          # версии — пин не трогаем: на этом случае падает валидация выше,
+          # и разбирает его человек.
+          osv_cur = "${{ steps.versions.outputs.OSV_CUR }}"
+          osv_target = "${{ steps.versions.outputs.OSV_TARGET }}"
+          osv_sha = "${{ steps.osv_validate.outputs.OSV_TARGET_SHA256 }}"
+          if osv_target != osv_cur:
+              if not re.fullmatch(r"[0-9a-f]{64}", osv_sha):
+                  raise SystemExit(f"версия osv поехала, а сумма не снята: {osv_sha!r}")
+              path = "actions/osv-scanner/action.yml"
+              text = open(path, encoding="utf-8").read()
+              updated, n = re.subn(r'(default:\s*")[0-9a-f]{64}(")',
+                                   rf"\g<1>{osv_sha}\g<2>", text)
+              if n != 1:
+                  raise SystemExit(f"{path}: ожидал ровно один пин sha256, нашёл {n}")
+              open(path, "w", encoding="utf-8").write(updated)
+              print(f"{path} sha256 -> {osv_sha}")
           PY
           git diff --stat
 
@@ -273,8 +337,14 @@ jobs:
             case "$tool" in
               gitleaks)
                 mkdir -p /tmp/probe-gitleaks
-                if curl -sfL "https://github.com/gitleaks/gitleaks/releases/download/v${new}/gitleaks_${new}_linux_x64.tar.gz" \
-                     | tar -xz -C /tmp/probe-gitleaks gitleaks 2>>"$log"; then
+                base="https://github.com/gitleaks/gitleaks/releases/download/v${new}"
+                # Проба мажора — тоже исполнение чужого бинаря в этом job'е,
+                # так что качается со сверкой. Несошедшаяся сумма попадёт в
+                # $log и станет вердиктом пробы, как и любой другой отказ.
+                if bash actions/fetch-verified/fetch_verified.sh \
+                     --url "${base}/gitleaks_${new}_linux_x64.tar.gz" \
+                     --sums-url "${base}/gitleaks_${new}_checksums.txt" \
+                     --dest /tmp/probe-gitleaks --member gitleaks >>"$log" 2>&1; then
                   tests/negative/assert-gitleaks.sh /tmp/probe-gitleaks/gitleaks "$new" >>"$log" 2>&1
                   rc=$?
                 else
@@ -282,6 +352,10 @@ jobs:
                 fi ;;
               osv)
                 mkdir -p /tmp/probe-osv
+                # Без сверки — и это единственное такое место, оставшееся
+                # осознанно: файла сумм апстрим не публикует (#13), а пин
+                # мажорной версии-кандидата взять неоткуда. Проба мажора и
+                # так не двигает пины: её вердикт уезжает в issue человеку.
                 if curl -sfL -o /tmp/probe-osv/osv-scanner \
                      "https://github.com/google/osv-scanner/releases/download/v${new}/osv-scanner_linux_amd64" 2>>"$log"; then
                   chmod +x /tmp/probe-osv/osv-scanner

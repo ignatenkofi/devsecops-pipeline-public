@@ -70,6 +70,15 @@ jobs:
       - name: "Негатив: fetch-verified обязан отказать на несошедшейся сумме"
         run: bash tests/negative/assert-fetch-verified.sh actions/fetch-verified/fetch_verified.sh
 
+      - name: "Гигиена манифестов: локальный uses в composite, диагностика под always()"
+        run: python3 tests/lint/assert-composite-hygiene.py .
+
+      # Детектора расхождения близнецов здесь НЕТ, и это не забывчивость:
+      # публичная CI не может прочитать приватный репозиторий, а выдавать
+      # ей токен ради проверки — решение владельца. Инвариант держится в
+      # selftest приватного репо (tests/lint/assert-twins.py лежит и здесь
+      # ровно затем, чтобы оба репо несли один файл).
+
       - name: actionlint (workflow-синтаксис)
         run: |
           set -euo pipefail

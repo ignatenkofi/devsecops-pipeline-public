@@ -1,14 +1,18 @@
 name: fetch-verified
 description: >-
-  Скачать релизный ассет апстрима, сверить sha256 с его файлом сумм и только
-  потом распаковать/сделать исполняемым. Общий помощник для стадий обоих
-  репо конвейера (#24) — но ПЕРЕВЕДЕНЫ НА НЕГО ПОКА НЕ ВСЕ: здесь gitleaks
-  и actionlint в selftest, а blocking-стадия sca (osv-scanner) и четыре
-  стадии приватного репо всё ещё качают бинарь без сверки. Не читать этот
-  манифест как «неподтверждённых загрузок в конвейере не осталось».
+  Скачать релизный ассет апстрима, сверить sha256 и только потом
+  распаковать/сделать исполняемым. Общий помощник для стадий обоих репо
+  конвейера (#24). Ожидаемая сумма берётся либо из файла сумм апстрима
+  (sums-url), либо из пина в этом репозитории (sha256) — ровно один из
+  двух, и это разные модели доверия, см. шапку fetch_verified.sh.
 
   Отказ при расхождении суммы и при отсутствии записи об ассете в файле
   сумм — оба случая роняют шаг.
+
+  Границы охвата, чтобы манифест не читался как «неподтверждённых
+  загрузок не осталось»: в этом репо через него идут все загрузки, кроме
+  пробы МАЖОРНОЙ версии osv-scanner в nightly-bump — там сумму кандидата
+  взять неоткуда, и это записано на месте.
 
   Это обёртка для вызова ИЗ ВОРКФЛОУ (`uses: …/actions/fetch-verified@v1`).
   Из другого composite action зови не её, а скрипт по пути
@@ -21,8 +25,13 @@ inputs:
     description: "URL релизного ассета"
     required: true
   sums-url:
-    description: "URL файла контрольных сумм апстрима (строки `sha256  имя`)"
-    required: true
+    description: "URL файла контрольных сумм апстрима (строки `sha256  имя`); взаимоисключающе с sha256"
+    required: false
+    default: ""
+  sha256:
+    description: "ожидаемая сумма пином в этом репозитории — для апстримов без файла сумм; взаимоисключающе с sums-url"
+    required: false
+    default: ""
   dest:
     description: "каталог, куда положить результат"
     required: true
@@ -34,6 +43,10 @@ inputs:
     description: "имя, под которым положить голый бинарь; взаимоисключающе с member"
     required: false
     default: ""
+  extract-all:
+    description: "распаковать архив целиком (для вложенной раскладки); 'true' включает, взаимоисключающе с member/output"
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
@@ -41,12 +54,17 @@ runs:
       env:
         FV_URL: ${{ inputs.url }}
         FV_SUMS: ${{ inputs.sums-url }}
+        FV_SHA256: ${{ inputs.sha256 }}
         FV_DEST: ${{ inputs.dest }}
         FV_MEMBER: ${{ inputs.member }}
         FV_OUTPUT: ${{ inputs.output }}
+        FV_EXTRACT_ALL: ${{ inputs.extract-all }}
       run: |
         set -euo pipefail
-        ARGS=(--url "$FV_URL" --sums-url "$FV_SUMS" --dest "$FV_DEST")
+        ARGS=(--url "$FV_URL" --dest "$FV_DEST")
+        [ -n "$FV_SUMS" ]   && ARGS+=(--sums-url "$FV_SUMS")
+        [ -n "$FV_SHA256" ] && ARGS+=(--sha256 "$FV_SHA256")
         [ -n "$FV_MEMBER" ] && ARGS+=(--member "$FV_MEMBER")
         [ -n "$FV_OUTPUT" ] && ARGS+=(--output "$FV_OUTPUT")
+        [ -n "$FV_EXTRACT_ALL" ] && ARGS+=(--extract-all)
         bash "${GITHUB_ACTION_PATH}/fetch_verified.sh" "${ARGS[@]}"
