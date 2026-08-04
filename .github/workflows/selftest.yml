@@ -243,6 +243,12 @@ jobs:
           fi
           echo "позитив ок: ложных срабатываний нет"
 
+      # Приёмник вызывается с `if: always()` ровно чтобы поймать аварийный
+      # прогон — и до этой фикстуры показывал нечитаемый SARIF как "?", а
+      # каталог без отчётов как «стадия пропущена», оставаясь зелёным.
+      - name: "Негатив: приёмник обязан падать на нечитаемом SARIF"
+        run: bash tests/negative/assert-sarif-report.sh actions/sarif-report/summarize.py
+
       - name: Отчёт
         if: always()
         uses: ./actions/sarif-report
