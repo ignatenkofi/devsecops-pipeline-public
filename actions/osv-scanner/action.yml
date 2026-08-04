@@ -16,20 +16,37 @@ inputs:
   version:
     required: false
     default: "2.4.0"
+  sha256:
+    # Сумма ассета пином ЗДЕСЬ, а не файлом сумм апстрима: osv-scanner
+    # такого файла не публикует вовсе (#13 — проверено пробами по девяти
+    # вероятным именам, все 404; публикуется только SLSA-провенанс
+    # multiple.intoto.jsonl, а он без проверки подписи не даёт ничего).
+    #
+    # Пин обязан двигаться вместе с version. nightly-bump пересчитывает
+    # его сам; правя version руками, пересчитай и сумму, иначе стадия
+    # честно откажется ставить бинарь.
+    description: "sha256 ассета osv-scanner_linux_amd64 для пина version"
+    required: false
+    default: "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0"
 runs:
   using: composite
   steps:
     - shell: bash
       env:
         OSV_VERSION: ${{ inputs.version }}
+        OSV_SHA256: ${{ inputs.sha256 }}
         SARIF_PATH: ${{ inputs.sarif-path }}
         TARGET: ${{ inputs.target }}
       run: |
         set -euo pipefail
         mkdir -p "$(dirname "$SARIF_PATH")" /tmp/osv
-        curl -sfL -o /tmp/osv/osv-scanner \
-          "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
-        chmod +x /tmp/osv/osv-scanner
+        # Скрипт по пути, а не `uses: ./actions/fetch-verified`: локальный
+        # uses внутри composite резолвится относительно рабочего каталога
+        # ПОТРЕБИТЕЛЯ — в selftest прошло бы, у потребителя сломалось бы.
+        bash "${GITHUB_ACTION_PATH}/../fetch-verified/fetch_verified.sh" \
+          --url "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64" \
+          --sha256 "$OSV_SHA256" \
+          --dest /tmp/osv --output osv-scanner
 
         # Форма команды разъехалась на мажоре 2.0, поэтому она выбирается по
         # пину, а не зашита: пин — input, и откат на 1.x обязан оставаться
