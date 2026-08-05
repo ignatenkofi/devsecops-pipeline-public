@@ -76,6 +76,12 @@ jobs:
       - name: "Негатив: обёртка fetch-verified соблюдает булев контракт"
         run: python3 tests/negative/assert-fetch-verified-wrapper.py .
 
+      # Гард на РАЗБОР ВХОДОВ, а не на разрешение профиля: skip-stages не
+      # проверял, существует ли переданное имя стадии, и опечатка молча не
+      # выключала ничего. Потребитель при этом был уверен, что выключил.
+      - name: "Негатив: profile-resolve обязан падать на опечатке в skip-stages"
+        run: bash tests/negative/assert-profile-resolve.sh
+
       - name: "Гигиена манифестов: локальный uses в composite, диагностика под always()"
         run: python3 tests/lint/assert-composite-hygiene.py .
 
