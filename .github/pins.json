@@ -1,0 +1,23 @@
+[
+  {
+    "name": "gitleaks",
+    "file": "actions/gitleaks/action.yml",
+    "input": "version",
+    "source": "github",
+    "id": "gitleaks/gitleaks"
+  },
+  {
+    "name": "semgrep",
+    "file": "actions/semgrep/action.yml",
+    "input": "version",
+    "source": "pypi",
+    "id": "semgrep"
+  },
+  {
+    "name": "osv",
+    "file": "actions/osv-scanner/action.yml",
+    "input": "version",
+    "source": "github",
+    "id": "google/osv-scanner"
+  }
+]

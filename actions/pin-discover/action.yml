@@ -1,0 +1,59 @@
+name: pin-discover
+description: >-
+  Снять текущие пины инструментов из action.yml потребителя, спросить апстрим
+  и разложить результат: что применять, что оставить человеку. Общая часть
+  ночного бампа для обоих конвейеров (#20) — валидация кандидата остаётся у
+  каждого репозитория своя, потому что она инструмент-специфична.
+
+  Мажорные обновления НЕ попадают в targets: мажор меняет поведение
+  инструмента, а иногда и CLI, на который стоят наши actions. Они уезжают в
+  has-major/majors и ждут человека.
+
+inputs:
+  spec:
+    description: "путь к JSON-спеке пинов (обычно .github/pins.json)"
+    required: false
+    default: ".github/pins.json"
+  token:
+    description: >-
+      токен для api.github.com. Не обязателен, но без него анонимный лимит
+      60 запросов в час на IP раннера — на общих раннерах это регулярный 403,
+      который выглядит как «апстрим недоступен».
+    required: false
+    default: ""
+outputs:
+  result:
+    description: "JSON: имя -> {cur,new,target,is_major,backport,moves}"
+    value: ${{ steps.run.outputs.result }}
+  targets:
+    description: "JSON: имя -> версия, которую надо записать в пин"
+    value: ${{ steps.run.outputs.targets }}
+  needs-bump:
+    description: "true, если есть НЕ мажорные обновления"
+    value: ${{ steps.run.outputs.needs-bump }}
+  has-major:
+    description: "true, если апстрим ушёл на мажор"
+    value: ${{ steps.run.outputs.has-major }}
+  minors:
+    description: "человекочитаемый список применяемых бампов"
+    value: ${{ steps.run.outputs.minors }}
+  majors:
+    description: "человекочитаемый список мажоров, ждущих разбора"
+    value: ${{ steps.run.outputs.majors }}
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        SPEC: ${{ inputs.spec }}
+        GH_API_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        # Скрипт по пути, а не `uses: ./actions/pin-tools`: локальный uses
+        # внутри composite резолвится относительно рабочего каталога
+        # ПОТРЕБИТЕЛЯ — в selftest прошло бы, у потребителя сломалось бы.
+        # Тот же приём, что у fetch-verified.
+        python3 "${GITHUB_ACTION_PATH}/../pin-tools/pins.py" discover \
+          --spec "$SPEC" --github-token "$GH_API_TOKEN" >> "$GITHUB_OUTPUT"
+        echo "pin-discover: спека $SPEC разобрана"
