@@ -1,0 +1,36 @@
+name: pin-apply
+description: >-
+  Записать целевые версии в пины action.yml. Парная к pin-discover; берёт её
+  выход `targets` как есть. Пин, чья цель совпадает с текущим значением, не
+  трогается — так apply идемпотентен и не создаёт пустых диффов.
+
+  Запись идёт по ИМЕНИ ВХОДА, а не по порядку default в файле: в
+  actions/docs-lint/action.yml пинов два, а рядом с версиями лежат нечисловые
+  значения (severity-floor, sha256). Несовпадение числа найденных мест роняет
+  шаг — записать «куда-нибудь» нельзя.
+
+inputs:
+  spec:
+    description: "путь к JSON-спеке пинов (та же, что у pin-discover)"
+    required: false
+    default: ".github/pins.json"
+  targets:
+    description: "JSON: имя -> версия (выход pin-discover)"
+    required: true
+outputs:
+  moved:
+    description: "сколько пинов реально изменилось"
+    value: ${{ steps.run.outputs.moved }}
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        SPEC: ${{ inputs.spec }}
+        TARGETS: ${{ inputs.targets }}
+      run: |
+        set -euo pipefail
+        printf '%s' "$TARGETS" > /tmp/pin-targets.json
+        python3 "${GITHUB_ACTION_PATH}/../pin-tools/pins.py" apply \
+          --spec "$SPEC" --targets /tmp/pin-targets.json >> "$GITHUB_OUTPUT"

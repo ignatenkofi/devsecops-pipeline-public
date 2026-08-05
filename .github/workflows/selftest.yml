@@ -82,6 +82,12 @@ jobs:
       - name: "Негатив: profile-resolve обязан падать на опечатке в skip-stages"
         run: bash tests/negative/assert-profile-resolve.sh
 
+      # Механика бампа пинов — общая на оба конвейера, значит ошибка в ней
+      # тиражируется на семь пинов сразу. Сеть здесь не нужна: апстрим
+      # подаётся файлом.
+      - name: "Негатив: механика бампа читает нужный пин и не применяет мажор"
+        run: bash tests/negative/assert-pins.sh
+
       - name: "Гигиена манифестов: локальный uses в composite, диагностика под always()"
         run: python3 tests/lint/assert-composite-hygiene.py .
 
