@@ -43,6 +43,12 @@ REQUIRED_IN_BOTH = (
     "tests/negative/assert-fetch-verified-wrapper.py",
     "tests/lint/assert-composite-hygiene.py",
     "tests/lint/assert-twins.py",
+    # Разрешение профиля: skip-stages молча глотал опечатки, и узнать об
+    # этом было неоткуда — скрипт жил в heredoc внутри action.yml.
+    # Вынесен в файл и обязан быть в обоих: у обоих репо один и тот же
+    # разбор входов, различаются только наборы стадий (--implemented).
+    "actions/profile-resolve/resolve.py",
+    "tests/negative/assert-profile-resolve.sh",
 )
 
 
@@ -88,10 +94,12 @@ def self_test() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         a, b = Path(tmp) / "a", Path(tmp) / "b"
         for root in (a, b):
-            (root / "actions/fetch-verified").mkdir(parents=True)
-            (root / "tests/negative").mkdir(parents=True)
-            (root / "tests/lint").mkdir(parents=True)
             for rel in REQUIRED_IN_BOTH:
+                # Каталоги выводятся из списка, а не перечисляются рядом с ним:
+                # пока они были отдельным списком, добавление записи в
+                # REQUIRED_IN_BOTH роняло САМОПРОВЕРКУ по FileNotFoundError —
+                # то есть детектор ломался ровно при попытке его расширить.
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 (root / rel).write_text("общий текст\n", encoding="utf-8")
 
         if compare(a, b):

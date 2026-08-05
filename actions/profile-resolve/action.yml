@@ -36,28 +36,15 @@ runs:
           echo "::error::Неизвестный repo-class '${REPO_CLASS}' (нет profiles/${REPO_CLASS}.yml)"; exit 1
         fi
         python3 -c "import yaml" 2>/dev/null || python3 -m pip install --quiet pyyaml
-        python3 - "$PROFILE" >> "$GITHUB_OUTPUT" <<'PY'
-        import os, sys, yaml
-        profile = yaml.safe_load(open(sys.argv[1]))
-        stages = profile.get("stages", {})
-        skip = {s.strip() for s in os.environ.get("SKIP", "").split(",") if s.strip()}
-        extra = {s.strip() for s in os.environ.get("EXTRA", "").split(",") if s.strip()}
-        m0 = ["secrets", "sast-semgrep", "sca"]  # реализованные стадии
-        # YAML 1.1: голое off парсится как False — нормализуем
-        def norm(v):
-            return "off" if v is False else str(v)
-        for name in m0:
-            mode = norm(stages.get(name, "off"))
-            if name in skip:
-                mode = "off"
-            elif name in extra and mode == "off":
-                mode = "A"
-            if mode not in ("B", "A", "off"):
-                mode = "off"
-            print(f"{name}={mode}")
-        pending = [s for s, m in stages.items() if s not in m0 and norm(m) != "off"]
-        if pending:
-            print(f"::notice::Стадии из профиля ещё не реализованы (ждут M1/M2): {', '.join(sorted(pending))}",
-                  file=sys.stderr)
-        PY
+        # Скрипт вынесен из heredoc в resolve.py: встроенный в YAML код нельзя
+        # запустить иначе как целым прогоном Actions, поэтому на него нельзя
+        # написать гард — и дефект «skip-stages молча глотает опечатку» прожил
+        # незамеченным ровно поэтому. Гард — tests/negative/assert-profile-resolve.sh.
+        # --implemented перечисляет стадии ЭТОГО репо. Сам resolve.py про них
+        # не знает намеренно: файл общий с приватным конвейером и обязан
+        # совпадать байт-в-байт (tests/lint/assert-twins.py), а наборы стадий
+        # у репозиториев разные. Различаться позволено манифестам.
+        python3 "${GITHUB_ACTION_PATH}/resolve.py" \
+          "$PROFILE" "${GITHUB_ACTION_PATH}/../../profiles" \
+          --implemented "secrets,sast-semgrep,sca" >> "$GITHUB_OUTPUT"
         echo "Профиль ${REPO_CLASS}: $(grep -E '^(secrets|sast-semgrep|sca)=' "$GITHUB_OUTPUT" | tail -3 | tr '\n' ' ')"
