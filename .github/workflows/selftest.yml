@@ -88,6 +88,13 @@ jobs:
       - name: "Негатив: механика бампа читает нужный пин и не применяет мажор"
         run: bash tests/negative/assert-pins.sh
 
+      # Стадия, прошедшая вхолостую, снаружи неотличима от чистой: на
+      # Swift-репо semgrep сканировал ноль файлов и гейт печатал
+      # «blocking-находок нет» (#33). Фикстура держит три состояния
+      # раздельно — применимо / неприменимо / неизвестно.
+      - name: "Негатив: применимость sast-semgrep различает ноль файлов и чистый прогон"
+        run: bash tests/negative/assert-semgrep-inapplicable.sh .
+
       - name: "Гигиена манифестов: локальный uses в composite, диагностика под always()"
         run: python3 tests/lint/assert-composite-hygiene.py .
 

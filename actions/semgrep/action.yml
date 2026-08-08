@@ -25,12 +25,39 @@ runs:
         FLOOR: ${{ inputs.severity-floor }}
       run: |
         set -euo pipefail
-        mkdir -p "$(dirname "$SARIF_PATH")"
+        OUT_DIR="$(dirname "$SARIF_PATH")"
+        mkdir -p "$OUT_DIR"
+        JSON_PATH="${SARIF_PATH%.sarif}.json"
         python3 -m pip install --quiet "semgrep==${SG_VERSION}"
         SEVERITY_ARGS=()
         [ "$FLOOR" = "ERROR" ] && SEVERITY_ARGS=(--severity ERROR)
-        # --error: ненулевой exit при находках; статус решает fail-политика
+        # --error: ненулевой exit при находках; статус решает fail-политика.
+        # --json-output рядом с SARIF нужен не ради находок, а ради
+        # paths.scanned: SARIF не говорит, сколько файлов РЕАЛЬНО
+        # просканировано, и пустой отчёт неотличим от «нечего сканировать»
+        # (#33). Проверено, что --error ведёт себя при этой форме так же:
+        # на репо с находкой обе формы дают rc=1 и одинаковый SARIF.
+        rc=0
         semgrep scan --metrics=off --error \
           --config "${GITHUB_ACTION_PATH}/rules" \
           "${SEVERITY_ARGS[@]}" \
-          --sarif --output "$SARIF_PATH" .
+          --sarif-output "$SARIF_PATH" --json-output "$JSON_PATH" . || rc=$?
+
+        # Применимость стадии. Молчаливый ноль — главный вред из #33:
+        # потребитель читает «находок нет» как «код проверен».
+        if scanned=$(python3 "${GITHUB_ACTION_PATH}/applicability.py" "$JSON_PATH"); then
+          if [ "$scanned" -eq 0 ]; then
+            echo "sast-semgrep" >> "$OUT_DIR/.inapplicable"
+            echo "::warning::sast-semgrep: правил под язык этого репозитория в offline-паке нет — просканировано 0 файлов, стадия НИЧЕГО не проверила"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              echo "- \`sast-semgrep\`: **неприменима** — правил под язык репозитория нет, просканировано 0 файлов" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "sast-semgrep: просканировано файлов: $scanned"
+          fi
+        else
+          # Не «неприменимо» и не «чисто» — состояние неизвестно, и
+          # рапортовать по нему здоровье кода нельзя.
+          echo "::warning::sast-semgrep: не удалось определить число просканированных файлов — применимость стадии НЕИЗВЕСТНА"
+        fi
+        exit $rc
