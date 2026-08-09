@@ -40,11 +40,19 @@ on:
         required: false
         type: string
         default: ""
+      runs-on:
+        # Одна метка, не JSON-массив: для self-hosted достаточно
+        # одной (у фермы polygon-iac — «polygon»), а публичные
+        # потребители не трогают ничего и остаются на ubuntu-latest.
+        description: "метка раннера: ubuntu-latest | polygon (ферма)"
+        required: false
+        type: string
+        default: "ubuntu-latest"
 
 jobs:
   light:
     name: "light · ${{ inputs.repo-class }}"
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     permissions:
       contents: read
     steps:
