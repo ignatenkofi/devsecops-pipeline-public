@@ -121,5 +121,21 @@ jobs:
           gate "$M_SECRETS" "$O_SECRETS" secrets
           gate "$M_SEMGREP" "$O_SEMGREP" sast-semgrep
           gate "$M_SCA" "$O_SCA" sca
-          [ "$fail" = "0" ] && echo "gate: blocking-находок нет"
+
+          # Стадия могла отработать вхолостую: правил под язык репозитория
+          # нет, сканировано ноль файлов (#33). «Находок нет» про такую
+          # стадию — ложь по умолчанию, поэтому вердикт формулируется иначе,
+          # а не дополняется примечанием.
+          inapplicable=""
+          if [ -s sarif/.inapplicable ]; then
+            inapplicable="$(sort -u sarif/.inapplicable | paste -sd', ' -)"
+            echo "::warning::стадии без применимых правил: ${inapplicable} — они не проверили НИЧЕГО"
+          fi
+          if [ "$fail" = "0" ]; then
+            if [ -n "$inapplicable" ]; then
+              echo "gate: blocking-находок нет СРЕДИ ПРОВЕРЕННОГО; не проверялось: ${inapplicable}"
+            else
+              echo "gate: blocking-находок нет"
+            fi
+          fi
           exit $fail

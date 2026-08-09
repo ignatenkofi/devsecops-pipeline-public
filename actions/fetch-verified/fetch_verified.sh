@@ -20,9 +20,17 @@
 #               с ассетом, подмены на пути от апстрима до раннера;
 #   НЕ защищает — от скомпрометированного релизного конвейера апстрима:
 #               файл сумм едет оттуда же, и кто подменит бинарь, подменит
-#               и сумму. Настоящая устойчивость к подмене — подпись,
-#               проверяемая ключом не из того же места (cosign — шаг 4
-#               в devsecops-pipeline#24).
+#               и сумму.
+#
+# Последнее снимается третьим источником доверия — cosign (--cosign-*):
+# подпись файла сумм проверяется против личности и издателя, то есть
+# доверие переносится с «того же хоста» на удостоверяющий центр Fulcio и
+# прозрачный журнал Rekor. Оговорка о границах остаётся в силе ВЕЗДЕ, где
+# cosign-флаги не переданы, — а это большинство инструментов: замер
+# 2026-08-04 показал, что подписи публикует syft, а gitleaks нет (13 проб
+# по именам ассетов при живом контроле). То есть шаг 4 из #24 применим к
+# одному инструменту, а не ко всем, и это свойство апстримов, а не
+# недоделка.
 #
 # Использование (ровно один режим установки и ровно один источник суммы):
 #   fetch_verified.sh --url URL (--sums-url URL | --sha256 HEX) --dest DIR --member NAME
@@ -37,6 +45,13 @@
 #                 target-triple в имени)
 #   --sums-url  файл контрольных сумм апстрима (формат `sha256  имя`)
 #   --sha256    ожидаемая сумма пином в НАШЕМ репозитории
+#
+#   --cosign-bin/-sig/-cert/-identity/-issuer — проверка подписи файла
+#               сумм (keyless, Fulcio+Rekor). Все пять или ни одного;
+#               только вместе с --sums-url. Бинарь cosign даёт вызывающий:
+#               скрипт, который сам себе качает верификатор, проверять его
+#               нечем — яйцо и курица. Ставить cosign полагается тем же
+#               скриптом с --sha256.
 #
 # Два источника ожидаемой суммы — не удобство, а разные модели доверия.
 #
@@ -57,6 +72,7 @@
 set -euo pipefail
 
 URL="" SUMS_URL="" SHA256="" MEMBER="" DEST="" OUTPUT="" EXTRACT_ALL=""
+COSIGN_BIN="" COSIGN_SIG="" COSIGN_CERT="" COSIGN_IDENTITY="" COSIGN_ISSUER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --url)         URL="$2"; shift 2 ;;
@@ -66,6 +82,11 @@ while [ $# -gt 0 ]; do
     --dest)        DEST="$2"; shift 2 ;;
     --output)      OUTPUT="$2"; shift 2 ;;
     --extract-all) EXTRACT_ALL=1; shift ;;
+    --cosign-bin)      COSIGN_BIN="$2"; shift 2 ;;
+    --cosign-sig)      COSIGN_SIG="$2"; shift 2 ;;
+    --cosign-cert)     COSIGN_CERT="$2"; shift 2 ;;
+    --cosign-identity) COSIGN_IDENTITY="$2"; shift 2 ;;
+    --cosign-issuer)   COSIGN_ISSUER="$2"; shift 2 ;;
     *) echo "::error::fetch-verified: неизвестный аргумент $1" >&2; exit 2 ;;
   esac
 done
@@ -87,6 +108,28 @@ modes=0
 [ -n "$EXTRACT_ALL" ] && modes=$((modes + 1))
 if [ "$modes" -ne 1 ]; then
   echo "::error::fetch-verified: нужен ровно один режим установки (--member | --output | --extract-all), задано $modes" >&2
+  exit 2
+fi
+
+# Пять cosign-флагов задаются вместе или не задаются вовсе. Считаем, а не
+# перечисляем пары, по той же причине, что и режимы установки.
+#
+# Личность и издатель ОБЯЗАТЕЛЬНЫ, а не опциональны: `verify-blob` без них
+# проверяет «подписано хоть кем-то», то есть принимает подпись любого, кто
+# сумел получить сертификат Fulcio, — защита, которая выглядит защитой и
+# ею не является.
+cosign_flags=0
+for _v in "$COSIGN_BIN" "$COSIGN_SIG" "$COSIGN_CERT" "$COSIGN_IDENTITY" "$COSIGN_ISSUER"; do
+  [ -n "$_v" ] && cosign_flags=$((cosign_flags + 1))
+done
+if [ "$cosign_flags" -ne 0 ] && [ "$cosign_flags" -ne 5 ]; then
+  echo "::error::fetch-verified: cosign требует все пять флагов (--cosign-bin --cosign-sig --cosign-cert --cosign-identity --cosign-issuer), задано $cosign_flags" >&2
+  exit 2
+fi
+if [ "$cosign_flags" -eq 5 ] && [ -z "$SUMS_URL" ]; then
+  # cosign здесь проверяет подпись ФАЙЛА СУММ. С пином в репозитории
+  # проверять нечего: доверие уже не зависит от апстрима.
+  echo "::error::fetch-verified: cosign применим только с --sums-url (подписывается файл сумм)" >&2
   exit 2
 fi
 
@@ -113,6 +156,28 @@ if [ -n "$SHA256" ]; then
   source_desc="пин в репозитории"
 else
   curl -sfL -o "$WORK/SUMS" "$SUMS_URL"
+
+  if [ "$cosign_flags" -eq 5 ]; then
+    # Подпись проверяется ДО того, как из файла сумм что-либо прочитано:
+    # непроверенный файл сумм не должен влиять даже на выбор строки.
+    curl -sfL -o "$WORK/SUMS.sig"  "$COSIGN_SIG"
+    curl -sfL -o "$WORK/SUMS.pem"  "$COSIGN_CERT"
+    if "$COSIGN_BIN" verify-blob \
+         --certificate "$WORK/SUMS.pem" \
+         --signature "$WORK/SUMS.sig" \
+         --certificate-identity-regexp "$COSIGN_IDENTITY" \
+         --certificate-oidc-issuer "$COSIGN_ISSUER" \
+         "$WORK/SUMS" >"$WORK/cosign.out" 2>&1; then
+      echo "fetch-verified: подпись файла сумм проверена (identity ~ $COSIGN_IDENTITY, issuer $COSIGN_ISSUER)"
+    else
+      echo "::error::fetch-verified: подпись файла сумм НЕ прошла проверку — отказываюсь ставить" >&2
+      sed 's/^/  /' "$WORK/cosign.out" >&2
+      exit 1
+    fi
+    sums_desc="$SUMS_URL (подпись cosign проверена)"
+  else
+    sums_desc="$SUMS_URL"
+  fi
   # Регистр нормализуется и здесь, а не только в ветке пина: sha256sum
   # печатает строчными, а файл сумм, перегенерированный через PowerShell
   # Get-FileHash или certutil, приходит ЗАГЛАВНЫМИ. Без этого нетронутый
@@ -128,7 +193,7 @@ else
     awk '{print "  " $2}' "$WORK/SUMS" >&2
     exit 1
   fi
-  source_desc="$SUMS_URL"
+  source_desc="$sums_desc"
 fi
 
 actual="$(sha256sum "$WORK/$ASSET" | awk '{print $1}')"
