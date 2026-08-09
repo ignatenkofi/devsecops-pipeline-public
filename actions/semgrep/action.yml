@@ -28,7 +28,17 @@ runs:
         OUT_DIR="$(dirname "$SARIF_PATH")"
         mkdir -p "$OUT_DIR"
         JSON_PATH="${SARIF_PATH%.sarif}.json"
-        python3 -m pip install --quiet "semgrep==${SG_VERSION}"
+        # Запечённый semgrep фермы (polygon-iac, шаблон v3) короткого
+        # замыкает установку: на noble системный pip закрыт PEP 668, и
+        # безусловный pip install падал бы. Несовпадение пина — честная
+        # установка как раньше (на hosted работает; на ферме упадёт
+        # громко, что и требуется: пин двигают вместе с шаблоном).
+        if command -v semgrep >/dev/null 2>&1 \
+           && [ "$(semgrep --version 2>/dev/null)" = "${SG_VERSION}" ]; then
+          echo "semgrep ${SG_VERSION} уже в PATH (запечён) — установка пропущена"
+        else
+          python3 -m pip install --quiet "semgrep==${SG_VERSION}"
+        fi
         SEVERITY_ARGS=()
         [ "$FLOOR" = "ERROR" ] && SEVERITY_ARGS=(--severity ERROR)
         # --error: ненулевой exit при находках; статус решает fail-политика.
