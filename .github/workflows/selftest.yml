@@ -129,6 +129,9 @@ jobs:
       - name: "Манифест объявляет ровно то, что печатает его скрипт (#19)"
         run: python3 tests/lint/assert-action-outputs.py .
 
+      - name: "У периодической джобы есть признак живости под always() (#19)"
+        run: python3 tests/lint/assert-schedule-liveness.py .
+
   stages:
     runs-on: ubuntu-latest
     steps:
