@@ -40,6 +40,19 @@ outputs:
   majors:
     description: "человекочитаемый список мажоров, ждущих разбора"
     value: ${{ steps.run.outputs.majors }}
+  # Эти два выхода `pins.py discover` печатал с самого начала, а манифест их
+  # не объявлял (#19). Необъявленный выход composite action — не ошибка, а
+  # ПУСТАЯ СТРОКА у потребителя: `nightly-bump.yml` читает
+  # `steps.versions.outputs.has-manual`, получает "", сравнение с 'true'
+  # всегда ложно, и признак живости «пины без гарда отстали» уходил в ветку
+  # `close` при любом состоянии мира. То есть сигнал, не способный сработать,
+  # — ровно тот класс дефекта, против которого заведена сама #19.
+  has-manual:
+    description: "true, если есть дрейф у пина с autobump: false"
+    value: ${{ steps.run.outputs.has-manual }}
+  manual:
+    description: "человекочитаемый список пинов без гарда, отставших от апстрима"
+    value: ${{ steps.run.outputs.manual }}
 runs:
   using: composite
   steps:

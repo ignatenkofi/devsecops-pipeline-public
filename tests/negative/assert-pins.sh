@@ -175,6 +175,79 @@ case "$(val "$out" manual)" in
 esac
 
 echo
+echo "--- НЕГАТИВ: форма тега апстрима не делает из минора мажор (#32) ---"
+# Апстрим отдаёт ТЕГ, а не версию. `lychee` тегает `lychee-v0.24.2`, и прежняя
+# нормализация (`tag_name.lstrip("v")`) снимала только ведущую `v` — то есть
+# для этого тега не делала ничего. Тег доезжал до сравнения мажоров целиком,
+# `"0" != "lychee-v0"` давало вечный фантомный мажор, и ночь звала человека
+# разобрать changelog обновления, которого нет. Боевой лог 2026-09-04:
+# `MAJORS: lychee 0.24.2 -> lychee-v0.24.2`.
+#
+# Почему этого кейса тут не было раньше: фикстура подавала УЖЕ нормализованные
+# версии и потому шла мимо разбора тега — проверяла вход, которого боевой путь
+# не видит. Теперь `--upstream-from` принимает тег, как его вернул бы апстрим.
+# СВОЯ фикстура. Секция `apply` выше переписывает общую (alpha 1.2.3 -> 1.3.0),
+# и первая редакция этого блока сравнивала теги с уже сдвинутым пином: 1.2.4
+# читалось как бэкпорт, needs-bump=false, и четыре ассерта краснели на
+# исправном коде. Блок, зависящий от порядка соседей, — не гард.
+mkdir -p "$TMP/tags/actions/one"
+cat > "$TMP/tags/actions/one/action.yml" <<'YML'
+name: tagged
+inputs:
+  alpha-version:
+    required: false
+    default: "1.2.3"
+runs:
+  using: composite
+YML
+cat > "$TMP/tags/spec.json" <<'JSON'
+[{"name":"alpha","file":"actions/one/action.yml","input":"alpha-version","source":"github","id":"x/alpha"}]
+JSON
+
+disc_tag() { # disc_tag <тег> -> stdout discover на своей фикстуре
+    printf '{"alpha":"%s"}' "$1" > "$TMP/tags/up.json"
+    ( cd "$TMP/tags" && python3 "$PINS" discover --spec spec.json --upstream-from up.json ) 2>"$TMP/err"
+}
+
+for tag in "1.2.4" "v1.2.4" "alpha-v1.2.4" "alpha/v1.2.4"; do
+    out=$(disc_tag "$tag")
+    if [ "$(val "$out" has-major)" = "false" ] && [ "$(val "$out" needs-bump)" = "true" ]; then
+        ok "тег '$tag' разобран как минор 1.2.4"
+    else
+        bad "тег '$tag': has-major=$(val "$out" has-major), needs-bump=$(val "$out" needs-bump) — форма тега подменила вердикт"
+    fi
+done
+
+# Цель обязана быть ГОЛОЙ версией: иначе префикс уедет в action.yml и пин
+# перестанет читаться собственным же разбором на следующую ночь.
+out=$(disc_tag "alpha-v1.2.4")
+if printf '%s' "$(val "$out" targets)" | grep -q '"alpha": *"1.2.4"'; then
+    ok "в пин пишется версия, а не тег"
+else
+    bad "в targets уехал тег: $(val "$out" targets)"
+fi
+
+# Настоящий мажор обязан остаться мажором — иначе «починка» просто ослепила
+# проверку. Позитивный контроль к четырём строкам выше.
+out=$(disc_tag "alpha-v2.0.0")
+if [ "$(val "$out" has-major)" = "true" ]; then
+    ok "мажор в префиксном теге остался мажором"
+else
+    bad "мажор потерян: has-major=$(val "$out" has-major)"
+fi
+
+echo
+echo "--- НЕГАТИВ: неразбираемый тег — отказ, а не «обновлений нет» ---"
+# Тихо оставить пин на теге, из которого версия не извлекается, значило бы
+# объявить ночь успешной, ничего не проверив.
+out=$(disc_tag "release-2024-01-05")
+if [ -z "$out" ] && grep -q "не извлекается версия" "$TMP/err"; then
+    ok "неразбираемый тег роняет discover и называет причину"
+else
+    bad "неразбираемый тег прошёл молча: out='$out' err='$(head -1 "$TMP/err")'"
+fi
+
+echo
 echo "--- боевая спека этого репозитория читается ---"
 if [ -f "$root/.github/pins.json" ]; then
     names=$(python3 -c "
