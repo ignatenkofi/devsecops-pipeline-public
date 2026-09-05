@@ -1,4 +1,4 @@
-# Класс: полка документов (homelab-shelf, sqst-memshelf, arch-designs-shelf,
+# Класс: полка документов (homelab-shelf, main-memshelf, arch-designs-shelf,
 # unevie-shelf). Кода почти нет; главная стадия — pii-gate (наследие
 # PII-политики 2026-06-10: PII-free by design).
 class: docs-shelf
