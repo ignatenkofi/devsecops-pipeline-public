@@ -49,10 +49,23 @@
     assert-schedule-liveness.py --inventory . --json     # машинно
 
 Признак живости у неактионсовой периодики берётся не из головы: в портфеле
-он существует ровно в двух формах, и обе видны в исполняемом скрипте —
-вызов пульса (`lib/heartbeat.sh`, `heartbeat_send`) либо запись маркера
-успеха (`.last-success`), который потом кто-то проверяет. Скрипт, который не
-делает ни того ни другого, снаружи неотличим от неработающего.
+он существует в трёх формах. Две видны в исполняемом скрипте — вызов пульса
+(`lib/heartbeat.sh`, `heartbeat_send`) либо запись маркера успеха
+(`.last-success`, `liveness_mark` из `lib/liveness.sh`), который потом
+кто-то проверяет. Третья — объявление в самом манифесте: ключ `X-Liveness=`
+в systemd-юните (`X-*` systemd игнорирует) или `X-Liveness` в plist называет
+артефакт свежести, который задача оставляет иначе — например, свой же TSV.
+Объявление принимается на слово: инвентарь артефакт не проверяет, а лишь
+перестаёт считать задачу слепой; проверка — команда, названная в объявлении.
+Скрипт, который не делает ничего из этого, снаружи неотличим от
+неработающего.
+
+Цель таймера, указывающая на консольный скрипт venv
+(`/opt/<продукт>/venv/bin/<имя> …`), разрешается через `[project.scripts]`
+ближайшего `pyproject.toml` в модуль входа — иначе каждый сервис на Python
+читался бы как «не смогли проверить», и это было бы вечно. Разоружённый
+plist (`Disabled = true`) — то же третье состояние, что снятый комментарием
+крон: не исполняется, признак неприменим, молчать нельзя.
 
 Коды возврата — конвенция портфеля, три состояния вместо двух:
 
@@ -154,12 +167,29 @@ class Task:
 _DISARMED_RX = re.compile(r"^\s*#\s*(?:-\s*)?(?:cron|schedule)\s*:", re.MULTILINE)
 
 
-# Две формы признака живости, которые в портфеле реально существуют.
-# Порядок важен только для текста вердикта.
+# Формы признака живости, видимые в исполняемом скрипте. Порядок важен
+# только для текста вердикта. Третья форма — объявление в манифесте —
+# живёт не здесь, а в `declared_signal`.
 SIGNAL_RULES = (
     ("пульс (heartbeat)", re.compile(r"heartbeat", re.IGNORECASE)),
     ("маркер успеха", re.compile(r"last[-_]success", re.IGNORECASE)),
+    ("маркер живости (lib/liveness.sh)", re.compile(r"\bliveness_mark\b")),
 )
+
+# Объявленный признак: ключ манифеста, а не строка скрипта. Принимается на
+# слово — см. шапку. Значение уходит в вердикт целиком, чтобы читатель видел,
+# ЧТО объявлено и чем это проверить.
+_DECLARED_KEY = "X-Liveness"
+_DECLARED_RX = re.compile(r"^X-Liveness\s*=\s*(.+?)\s*$", re.MULTILINE)
+
+
+def declared_signal(*texts: str) -> str:
+    """Значение `X-Liveness=` в первом из текстов, где оно есть ("" — нет)."""
+    for text in texts:
+        m = _DECLARED_RX.search(code_lines(text))
+        if m:
+            return m.group(1)
+    return ""
 
 
 def code_lines(text: str) -> str:
@@ -202,7 +232,43 @@ def resolve_in_repo(root: Path, raw: str) -> Path | None:
     if direct.is_file():
         return direct
     hits = [p for p in root.rglob(Path(raw).name) if p.is_file()]
-    return hits[0] if len(hits) == 1 else None
+    if len(hits) == 1:
+        return hits[0]
+    venv = _VENV_BIN_RX.search(raw)
+    return _console_script_module(root, venv.group(1)) if venv else None
+
+
+_VENV_BIN_RX = re.compile(r"(?:^|/)(?:venv|\.venv|env)/bin/([\w.-]+)$")
+_SCRIPTS_SECTION_RX = re.compile(
+    r"^\[project\.scripts\][ \t]*\n(.*?)(?=^\[|\Z)", re.MULTILINE | re.DOTALL)
+_SCRIPT_ENTRY_RX = re.compile(r'^\s*"?([\w.-]+)"?\s*=\s*"([\w.]+):[\w.]+"')
+_SKIP_DIRS = {".git", "venv", ".venv", "env", "node_modules", "__pycache__"}
+
+
+def _console_script_module(root: Path, name: str) -> Path | None:
+    """`venv/bin/<name>` → файл модуля из `[project.scripts]` (плоская или
+    src-раскладка). Нет записи или файла — None, то есть честный UNKNOWN."""
+    for pp in sorted(root.rglob("pyproject.toml")):
+        if _SKIP_DIRS & set(pp.relative_to(root).parts):
+            continue
+        section = _SCRIPTS_SECTION_RX.search(
+            pp.read_text(encoding="utf-8", errors="replace"))
+        if not section:
+            continue
+        for ln in section.group(1).splitlines():
+            entry = _SCRIPT_ENTRY_RX.match(ln)
+            if not entry or entry.group(1) != name:
+                continue
+            parts = entry.group(2).split(".")
+            for base in (pp.parent, pp.parent / "src"):
+                mod = base.joinpath(*parts).with_suffix(".py")
+                if mod.is_file():
+                    return mod
+                init = base.joinpath(*parts) / "__init__.py"
+                if init.is_file():
+                    return init
+            return None
+    return None
 
 
 def scan_actions(root: Path, repo: str) -> list[Task]:
@@ -267,15 +333,25 @@ def scan_launchd(root: Path, repo: str) -> list[Task]:
         args = " ".join(str(a) for a in (d.get("ProgramArguments") or []))
         m = re.search(r"[\w./-]+\.(?:sh|py)", args)
         raw = m.group(0) if m else ""
-        script = resolve_in_repo(root, raw)
-        status, signal = script_signal(script) if script else (UNKNOWN, "")
+        schedule = f"каждые {every} с" if every is not None else str(cal)
+        declared = str(d.get(_DECLARED_KEY) or "")
+        if d.get("Disabled") is True:
+            # Разоружён ключом: launchd такой плист не грузит. Третье
+            # состояние, как снятый комментарием крон, — не отказ и не дыра.
+            status, signal = DISARMED, ""
+            schedule = f"снято ключом Disabled ({schedule})"
+        elif declared:
+            status, signal = OK, f"объявлен: {declared}"
+        else:
+            script = resolve_in_repo(root, raw)
+            status, signal = script_signal(script) if script else (UNKNOWN, "")
         tasks.append(
             Task(
                 "launchd",
                 repo,
                 str(path.relative_to(root)),
                 str(d.get("Label") or path.stem),
-                f"каждые {every} с" if every is not None else str(cal),
+                schedule,
                 raw,
                 status,
                 signal,
@@ -306,14 +382,17 @@ def scan_systemd(root: Path, repo: str) -> list[Task]:
         if not svc.is_file():
             svc = path.with_name(unit.group(1).strip() if unit else path.stem + ".service")
         raw = ""
-        if svc.is_file():
-            ex = re.search(r"^ExecStart=(.+)$", code_lines(
-                svc.read_text(encoding="utf-8", errors="replace")), re.MULTILINE)
-            if ex:
-                m = re.search(r"[\w./-]+\.(?:sh|py)", ex.group(1))
-                raw = m.group(0) if m else ex.group(1).split()[0]
-        script = resolve_in_repo(root, raw)
-        status, signal = script_signal(script) if script else (UNKNOWN, "")
+        svc_text = svc.read_text(encoding="utf-8", errors="replace") if svc.is_file() else ""
+        ex = re.search(r"^ExecStart=(.+)$", code_lines(svc_text), re.MULTILINE)
+        if ex:
+            m = re.search(r"[\w./-]+\.(?:sh|py)", ex.group(1))
+            raw = m.group(0) if m else ex.group(1).split()[0]
+        declared = declared_signal(svc_text, body)
+        if declared:
+            status, signal = OK, f"объявлен: {declared}"
+        else:
+            script = resolve_in_repo(root, raw)
+            status, signal = script_signal(script) if script else (UNKNOWN, "")
         tasks.append(
             Task(
                 "systemd",
@@ -422,6 +501,14 @@ _BROKEN_WF = "on: [\n  незакрытая последовательность
 _SCRIPT_LIVE = "#!/bin/sh\n. lib/heartbeat.sh\nheartbeat_send ran\n"
 _SCRIPT_COMMENT_ONLY = "#!/bin/sh\n# TODO: прикрутить heartbeat\necho ok\n"
 _SCRIPT_BLIND = "#!/bin/sh\necho ok\n"
+_SCRIPT_MARK = "#!/bin/sh\n. scripts/lib/liveness.sh\nliveness_mark demo\n"
+_SCRIPT_MARK_COMMENT = "#!/bin/sh\n# liveness_mark demo — когда-нибудь\necho ok\n"
+_SERVICE_DECLARED = (
+    "[Service]\nExecStart=__REPO_PATH__/scripts/live.sh\n"
+    "X-Liveness=artifact /var/lib/x/x.tsv; проверка: x.sh --check\n"
+)
+_PYPROJECT_SCRIPTS = "[project]\nname = \"foo\"\n\n[project.scripts]\nfoo-svc = \"foo_pkg.cli:main\"\n"
+_SERVICE_VENV = "[Service]\nExecStart=/opt/foo/venv/bin/foo-svc sync\n"
 
 
 def _fixture_repo(tmp: Path) -> Path:
@@ -507,6 +594,73 @@ def selftest() -> list:
             problems.append("самопроверка: неразбираемый манифест исчез из инвентаря")
         if ".github/workflows/eventful.yml" in acts:
             problems.append("самопроверка: workflow без расписания попал в инвентарь")
+
+        # Третья форма в скрипте: liveness_mark — сигнал; в комментарии — нет.
+        (root / "scripts/systemd/t.service").write_text(
+            "[Service]\nExecStart=__REPO_PATH__/scripts/live.sh\n", encoding="utf-8")
+        (root / "scripts/live.sh").write_text(_SCRIPT_MARK, encoding="utf-8")
+        sysd = [t for t in scan_repo(root) if t.mechanism == "systemd"]
+        if [t.status for t in sysd] != [OK] or "liveness" not in sysd[0].signal:
+            problems.append(
+                f"самопроверка: liveness_mark не зачтён за сигнал — {[(t.status, t.signal) for t in sysd]}")
+        (root / "scripts/live.sh").write_text(_SCRIPT_MARK_COMMENT, encoding="utf-8")
+        if [t.status for t in scan_repo(root) if t.mechanism == "systemd"] != [GAP]:
+            problems.append("самопроверка: liveness_mark в комментарии зачтён за сигнал")
+
+        # Объявленный признак: слепой скрипт + X-Liveness в юните — есть;
+        # без ключа — нет. Ключ в комментарии — не объявление.
+        (root / "scripts/live.sh").write_text(_SCRIPT_BLIND, encoding="utf-8")
+        (root / "scripts/systemd/t.service").write_text(_SERVICE_DECLARED, encoding="utf-8")
+        sysd = [t for t in scan_repo(root) if t.mechanism == "systemd"]
+        if [t.status for t in sysd] != [OK] or not sysd[0].signal.startswith("объявлен: artifact"):
+            problems.append(
+                f"самопроверка: X-Liveness в юните не зачтён — {[(t.status, t.signal) for t in sysd]}")
+        (root / "scripts/systemd/t.service").write_text(
+            _SERVICE_DECLARED.replace("X-Liveness=", "# X-Liveness="), encoding="utf-8")
+        if [t.status for t in scan_repo(root) if t.mechanism == "systemd"] != [GAP]:
+            problems.append("самопроверка: закомментированный X-Liveness зачтён за объявление")
+
+        # Консольный скрипт venv → модуль из [project.scripts]: живой модуль —
+        # есть, слепой — нет, без записи — не смогли проверить.
+        (root / "svc/foo_pkg").mkdir(parents=True)
+        (root / "svc/pyproject.toml").write_text(_PYPROJECT_SCRIPTS, encoding="utf-8")
+        (root / "svc/foo_pkg/cli.py").write_text("def main():\n    heartbeat_send()\n", encoding="utf-8")
+        (root / "scripts/systemd/t.service").write_text(_SERVICE_VENV, encoding="utf-8")
+        sysd = [t for t in scan_repo(root) if t.mechanism == "systemd"]
+        if [t.status for t in sysd] != [OK]:
+            problems.append(
+                f"самопроверка: venv/bin/<скрипт> не разрешён через pyproject — {[(t.status, t.signal) for t in sysd]}")
+        (root / "svc/foo_pkg/cli.py").write_text("def main():\n    pass\n", encoding="utf-8")
+        if [t.status for t in scan_repo(root) if t.mechanism == "systemd"] != [GAP]:
+            problems.append("самопроверка: слепой модуль venv-скрипта не пойман")
+        (root / "svc/pyproject.toml").write_text("[project]\nname = \"foo\"\n", encoding="utf-8")
+        if [t.status for t in scan_repo(root) if t.mechanism == "systemd"] != [UNKNOWN]:
+            problems.append("самопроверка: venv-скрипт без записи в pyproject дал не unknown")
+
+        # Разоружённый plist: Disabled=true — снято (даже при слепой цели);
+        # Disabled=false — обычная задача, и слепая цель остаётся дырой.
+        for fname, disabled in (("off.plist", True), ("on.plist", False)):
+            plistlib.dump(
+                {"Label": fname, "StartInterval": 900, "Disabled": disabled,
+                 "ProgramArguments": ["/bin/bash", "-lc", 'cd "__REPO_PATH__" && scripts/live.sh']},
+                (root / "scripts/launchd" / fname).open("wb"),
+            )
+        pl = {t.name: t for t in scan_repo(root) if t.mechanism == "launchd"}
+        if pl["off.plist"].status != DISARMED or "Disabled" not in pl["off.plist"].schedule:
+            problems.append(
+                f"самопроверка: plist с Disabled=true не опознан как снятый — {pl['off.plist']}")
+        if pl["on.plist"].status != GAP:
+            problems.append(
+                f"самопроверка: plist с Disabled=false прочитан как {pl['on.plist'].status}, а не gap")
+        # Объявление в plist — та же третья форма.
+        plistlib.dump(
+            {"Label": "decl.plist", "StartInterval": 900, "X-Liveness": "artifact /tmp/x",
+             "ProgramArguments": ["/bin/bash", "-lc", 'cd "__REPO_PATH__" && scripts/live.sh']},
+            (root / "scripts/launchd/decl.plist").open("wb"),
+        )
+        pl = {t.name: t for t in scan_repo(root) if t.mechanism == "launchd"}
+        if pl["decl.plist"].status != OK or not pl["decl.plist"].signal.startswith("объявлен"):
+            problems.append(f"самопроверка: X-Liveness в plist не зачтён — {pl['decl.plist']}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return problems
@@ -552,7 +706,7 @@ def run_repo_mode(root: Path) -> int:
     # значит красить чужой репозиторий своим прогоном.
     other = [t for t in scan_repo(root) if t.mechanism != "actions"]
     if other:
-        gaps = [t for t in other if t.status != OK]
+        gaps = [t for t in other if t.status not in (OK, DISARMED)]
         print(f"::notice::вне Actions в этом репозитории периодических задач "
               f"{len(other)}, без признака живости {len(gaps)} — "
               f"сквозной вердикт: --inventory")
@@ -589,7 +743,7 @@ def run_inventory(where: Path, as_json: bool) -> int:
           f"{len(gaps)}, не смогли проверить {len(unknown)}; "
           f"разоружённых расписаний {len(disarmed)}", file=sys.stderr)
     for t in disarmed:
-        print(f"::notice::{t.repo}/{t.where}: расписание снято комментарием — "
+        print(f"::notice::{t.repo}/{t.where}: расписание {t.schedule} — "
               f"задача не исполняется, признак живости к ней неприменим",
               file=sys.stderr)
     if gaps:

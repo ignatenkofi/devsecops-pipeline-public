@@ -132,6 +132,9 @@ jobs:
       - name: "У периодической джобы есть признак живости под always() (#19)"
         run: python3 tests/lint/assert-schedule-liveness.py .
 
+      - name: "Self-hosted job на pull_request несёт fork-guard (ADR 0005, #9)"
+        run: python3 tests/lint/assert-fork-guard.py .
+
   stages:
     runs-on: ubuntu-latest
     steps:
