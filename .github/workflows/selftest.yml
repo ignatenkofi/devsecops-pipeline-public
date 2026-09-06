@@ -138,6 +138,9 @@ jobs:
       - name: "Байткода Python в индексе нет (#18)"
         run: python3 tests/lint/assert-no-bytecode.py .
 
+      - name: "Шапка и разделитель GFM-таблицы совпадают (#18)"
+        run: python3 tests/lint/assert-md-tables.py .
+
   stages:
     runs-on: ubuntu-latest
     steps:
