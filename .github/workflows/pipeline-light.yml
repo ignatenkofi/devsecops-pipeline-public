@@ -27,7 +27,7 @@ on:
   workflow_call:
     inputs:
       repo-class:
-        description: "library | service | docs-shelf | course-content | vuln-demo"
+        description: "library | service | docs-shelf | course-content | vuln-demo | app-client"
         required: true
         type: string
       skip-stages:

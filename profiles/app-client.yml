@@ -1,0 +1,24 @@
+# Класс: клиентское приложение (atlas-native, yinguo-native, hanzi-native, ...)
+# — собирается в артефакт для пользователя/магазина (.app/.ipa), без контейнера
+# и без сетевой поверхности. Заведён по devsecops-pipeline#34: до него Swift-репо
+# брали `library` наугад, а по смыслу это подмена (там container: A, здесь off).
+# Режимы: B blocking · A advisory · R только на release · off не запускается.
+# Матрица — из ARCHITECTURE «Репо-класс × стадии»; исполняются реализованные
+# стадии (M0: secrets, sast-semgrep, sca), остальные ждут своих фаз.
+#
+# Чего здесь НЕТ (осознанно): языковых стадий build/test/lint под Swift. Они
+# требуют macOS-раннера (приватные репо — минуты ×10), и триггеры под них
+# выбирает владелец; до их появления единственная содержательная стадия для
+# Swift-репо — secrets (sast-semgrep без Swift-правил вхолостую, #33).
+class: app-client
+stages:
+  secrets: B
+  pii-gate: A        # M2 (после доставки pattern packs pii-mcp)
+  sast-semgrep: B    # осмысленно после #33 (Swift-правил в offline-паке нет)
+  sast-sonar: A      # M1 (полигон)
+  sca: B
+  docs-lint: A       # M1
+  course-lint: "off"
+  container: "off"   # артефакт — .app/.ipa, не образ
+  sbom: R            # M1
+  dast: "off"        # веб-поверхности нет

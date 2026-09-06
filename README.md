@@ -26,7 +26,7 @@ jobs:
   pipeline:
     uses: ignatenkofi/devsecops-pipeline-public/.github/workflows/pipeline-light.yml@v1
     with:
-      repo-class: library   # library | service | docs-shelf | course-content
+      repo-class: library   # library | service | docs-shelf | course-content | app-client
 ```
 
 Всё. На каждый PR и push в `main` прогонятся три стадии; отчёты — артефактом
@@ -63,6 +63,7 @@ jobs:
 | `docs-shelf` | B | off | off | полки документов (кода почти нет) |
 | `course-content` | B | A | A | учебный контент (примеры кода намеренно неидеальны) |
 | `vuln-demo` | A | A | A | намеренно уязвимое демо — витрина находок, ничего не блокирует |
+| `app-client` | B | B | B | клиентские приложения (Swift/SwiftUI): артефакт `.app`/`.ipa`, без контейнера и веб-поверхности |
 
 Класс `vuln-demo` — особый: приложение уязвимо by design (студенты сканируют
 его вручную), поэтому все стадии advisory, включая secrets. Конвейер тут —
