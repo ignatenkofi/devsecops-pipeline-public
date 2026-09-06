@@ -5,6 +5,14 @@ selftest). Формат — [Keep a Changelog], версии — semver.
 
 ## [Unreleased]
 
+### Added
+- **Класс `app-client`** (приватный `devsecops-pipeline#34`) — профиль под
+  клиентские приложения (`profiles/app-client.yml`): `container: off`,
+  `dast: off`, остальное как у `library`. До него Swift-репо выбирали
+  `library` наугад с десятистрочным обоснованием в адаптере. Языковых стадий
+  под Swift (build/test/lint на macOS-раннере) профиль не несёт — их триггеры
+  и цена ×10 минут за владельцем.
+
 ### Fixed
 - **Форма тега апстрима делала из минора вечный мажор** (приватный
   `devsecops-pipeline#32`). Нормализацией версии был `tag_name.lstrip("v")` —
