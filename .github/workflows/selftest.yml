@@ -23,7 +23,7 @@ jobs:
           KNOWN = {"secrets","pii-gate","sast-semgrep","sast-sonar","sca",
                    "docs-lint","course-lint","container","sbom","dast"}
           MODES = {"B","A","R","off"}
-          CORE = {"library","service","docs-shelf","course-content"}
+          CORE = {"library","service","docs-shelf","course-content","app-client"}
           # vuln-demo — санкционированный класс-исключение: намеренно уязвимое
           # демо, все стадии advisory (в т.ч. secrets), витрина без блокировок.
           SECRETS_B_EXEMPT = {"vuln-demo"}
@@ -149,7 +149,7 @@ jobs:
           m0 = ["secrets", "sast-semgrep", "sca"]
           def norm(v):
               return "off" if v is False else str(v)
-          for c in ["library", "service", "docs-shelf", "course-content", "vuln-demo"]:
+          for c in ["library", "service", "docs-shelf", "course-content", "vuln-demo", "app-client"]:
               st = yaml.safe_load(open(f"profiles/{c}.yml"))["stages"]
               modes = {s: norm(st.get(s, "off")) for s in m0}
               bad = {s: m for s, m in modes.items() if m not in ("B", "A", "off")}
