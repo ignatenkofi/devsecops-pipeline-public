@@ -135,6 +135,12 @@ jobs:
       - name: "Self-hosted job на pull_request несёт fork-guard (ADR 0005, #9)"
         run: python3 tests/lint/assert-fork-guard.py .
 
+      - name: "Байткода Python в индексе нет (#18)"
+        run: python3 tests/lint/assert-no-bytecode.py .
+
+      - name: "Шапка и разделитель GFM-таблицы совпадают (#18)"
+        run: python3 tests/lint/assert-md-tables.py .
+
   stages:
     runs-on: ubuntu-latest
     steps:
