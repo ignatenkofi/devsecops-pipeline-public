@@ -121,11 +121,38 @@ def main(argv: list[str]) -> int:
             mode = "off"
         print(f"{release}={mode}")
 
+    # Стадии, объявленные профилем, которых ЭТОТ конвейер не исполняет.
+    # Уходят ВЫХОДОМ, а не только диагностикой. Причина в самой issue #19:
+    # «зелёный honest-skip печатает ::notice::, который никто не читает», —
+    # и вердикт Gate его действительно не видел. Соседний класс «стадия
+    # отработала, но правил под язык не нашлось» (sarif/.inapplicable) текст
+    # вердикта МЕНЯЕТ; этот, где стадия не выполнялась вовсе, не менял, так
+    # что «blocking-находок нет» печаталось и при блокирующей по профилю
+    # стадии, которой в конвейере нет вообще (profiles/library.yml,
+    # `sast-sonar: B` — исполнителя нет ни в одном воркфлоу обоих репо).
+    #
+    # Режим стадии сохраняется отдельным выходом: нереализованная B и
+    # нереализованная A — разные новости, а один общий список делает их
+    # неразличимыми ровно там, где разница и важна.
+    #
+    # Явный `skip-stages` из списка вычитается: потребитель, выключивший
+    # стадию сам, уже знает, что её нет; строка про неё приучала бы
+    # пропускать весь вердикт.
     accounted = set(implemented) | ({release} if release else set())
-    pending = [s for s, m in stages.items() if s not in accounted and norm(m) != "off"]
+    pending = {
+        s: norm(m)
+        for s, m in stages.items()
+        # Режим R (release-стадия) сюда не идёт: она живёт вне контракта
+        # B/A/off, её читает release-джоб, и Gate про неё вердикта не выносит.
+        # Первая редакция фильтровала по `!= "off"` — и light-конвейер, куда
+        # `--release-stage` не передаётся, объявлял `sbom` неисполняемым.
+        if s not in accounted and norm(m) in ("B", "A") and s not in skip
+    }
+    print(f"unimplemented={','.join(sorted(pending))}")
+    print(f"unimplemented-blocking={','.join(sorted(s for s, m in pending.items() if m == 'B'))}")
     if pending:
         print(
-            f"::notice::Стадии из профиля ещё не реализованы (ждут M1/M2): "
+            f"::notice::Стадии профиля, которые этот конвейер не исполняет: "
             f"{', '.join(sorted(pending))}",
             file=sys.stderr,
         )
