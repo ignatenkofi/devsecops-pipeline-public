@@ -20,6 +20,13 @@ outputs:
     value: ${{ steps.resolve.outputs.sast-semgrep }}
   sca:
     value: ${{ steps.resolve.outputs.sca }}
+  # Стадии, объявленные профилем и НЕ исполняемые этим конвейером (#19).
+  # Читает их шаг Gate: вердикт «blocking-находок нет» обязан отличать
+  # «проверено и чисто» от «не проверялось вовсе».
+  unimplemented:
+    value: ${{ steps.resolve.outputs.unimplemented }}
+  unimplemented-blocking:
+    value: ${{ steps.resolve.outputs.unimplemented-blocking }}
 runs:
   using: composite
   steps:
