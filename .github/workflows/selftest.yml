@@ -141,6 +141,12 @@ jobs:
       - name: "Шапка и разделитель GFM-таблицы совпадают (#18)"
         run: python3 tests/lint/assert-md-tables.py .
 
+      # ПОСЛЕДНИЙ шаг джобы намеренно, хотя по смыслу он из блока «Негатив»
+      # выше: новый блокирующий шаг в середине скрывает всё, что стоит за
+      # ним, пока краснеет (polygon-iac#81). Здесь за ним не стоит ничего.
+      - name: "Негатив: вердикт Gate отличает «чисто» от «не проверялось» (#19)"
+        run: bash tests/negative/assert-gate-verdict.sh
+
   stages:
     runs-on: ubuntu-latest
     steps:

@@ -96,10 +96,17 @@ run_case "оба класса непроверенного попадают в �
 
 # Блокирующая стадия, которая ОТРАБОТАЛА и нашла проблемы, обязана ронять
 # job — иначе тест доказал бы лишь то, что вердикт разговорчив.
+#
+# Все стадии разом объявлены блокирующими и упавшими, а не одна названная:
+# наборы стадий у половин конвейера РАЗНЫЕ (light — secrets/semgrep/sca,
+# heavy — docs-lint/container/course-lint), и кейс с одной стадией зеленел
+# бы в том репо, где её нет. Так и вышло при переносе фикстуры: light её
+# ронял, heavy — нет.
+: > "$work/sarif/.inapplicable"
 out="$(cd "$work" && M_SECRETS=B M_SEMGREP=B M_SCA=B \
-      M_DOCS_LINT=A M_CONTAINER=A M_COURSE_LINT=off \
-      O_SECRETS=failure O_SEMGREP=success O_SCA=success \
-      O_DOCS_LINT=success O_CONTAINER=success O_COURSE_LINT=skipped \
+      M_DOCS_LINT=B M_CONTAINER=B M_COURSE_LINT=B \
+      O_SECRETS=failure O_SEMGREP=failure O_SCA=failure \
+      O_DOCS_LINT=failure O_CONTAINER=failure O_COURSE_LINT=failure \
       U_ALL="" U_BLOCKING="" bash gate.sh 2>&1)"
 if [ "$?" != "0" ] && printf '%s' "$out" | grep -q 'merge заблокирован'; then
   echo "  ok   находка blocking-стадии по-прежнему роняет job"; n_ok=$((n_ok + 1))
