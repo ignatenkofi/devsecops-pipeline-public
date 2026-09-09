@@ -5,6 +5,13 @@ selftest). Формат — [Keep a Changelog], версии — semver.
 
 ## [Unreleased]
 
+### Changed
+- **cosign 2.4.1 → 3.1.3 в фикстуре** `tests/negative/assert-cosign-sums.sh`
+  (близнец приватного `devsecops-pipeline#56`). Мажор без смены вызова:
+  `verify-blob --certificate/--signature` в 3.x объявлены deprecated, но
+  работают до v4 (sigstore/cosign#4822, #4838); 3.1.3 закрывает
+  GHSA-fx35-mq7g-6g98.
+
 ## [1.5.0] — 2026-09-09
 
 ### Added
