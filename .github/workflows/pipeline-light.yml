@@ -113,6 +113,8 @@ jobs:
           O_SECRETS: ${{ steps.secrets.outcome }}
           O_SEMGREP: ${{ steps.semgrep.outcome }}
           O_SCA: ${{ steps.sca.outcome }}
+          U_ALL: ${{ steps.profile.outputs.unimplemented }}
+          U_BLOCKING: ${{ steps.profile.outputs.unimplemented-blocking }}
         run: |
           set -euo pipefail
           fail=0
@@ -139,9 +141,27 @@ jobs:
             inapplicable="$(sort -u sarif/.inapplicable | paste -sd', ' -)"
             echo "::warning::стадии без применимых правил: ${inapplicable} — они не проверили НИЧЕГО"
           fi
+
+          # Второй класс непроверенного, и до 2026-09-08 он в вердикт не
+          # попадал: стадия объявлена профилем, но этот конвейер её не
+          # исполняет. resolve.py знал о ней и печатал ::notice:: — канал,
+          # про который issue #19 говорит «его никто не читает».
+          # Блокирующая по профилю выносится отдельной строкой: у профиля
+          # library `sast-sonar: B`, а шага под неё нет ни в одном воркфлоу.
+          unimplemented="${U_ALL//,/, }"
+          if [ -n "${U_BLOCKING}" ]; then
+            echo "::warning::blocking-стадии профиля этот конвейер не исполняет: ${U_BLOCKING//,/, } — они не проверили НИЧЕГО"
+          fi
+
           if [ "$fail" = "0" ]; then
-            if [ -n "$inapplicable" ]; then
-              echo "gate: blocking-находок нет СРЕДИ ПРОВЕРЕННОГО; не проверялось: ${inapplicable}"
+            unchecked=""
+            [ -n "$inapplicable" ] && unchecked="не проверялось: ${inapplicable}"
+            if [ -n "$unimplemented" ]; then
+              [ -n "$unchecked" ] && unchecked="${unchecked}; "
+              unchecked="${unchecked}объявлено профилем, но не исполняется: ${unimplemented}"
+            fi
+            if [ -n "$unchecked" ]; then
+              echo "gate: blocking-находок нет СРЕДИ ПРОВЕРЕННОГО; ${unchecked}"
             else
               echo "gate: blocking-находок нет"
             fi

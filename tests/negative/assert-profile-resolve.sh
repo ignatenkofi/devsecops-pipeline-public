@@ -94,6 +94,63 @@ else
 fi
 
 echo
+echo "--- Стадии, объявленные профилем и НЕ исполняемые этим конвейером ---"
+echo "    (#19: про них печатался только ::notice::, которого вердикт Gate"
+echo "     не видел — то есть «blocking-находок нет» звучало и тогда, когда"
+echo "     блокирующей по профилю стадии в конвейере нет вовсе)"
+
+unimpl_of() { # unimpl_of <ключ> <SKIP> <класс> [доп. аргументы]
+  local key="$1" skip="$2" cls="$3"; shift 3
+  SKIP="$skip" EXTRA="" python3 "$resolve" "$profiles/$cls.yml" "$profiles" \
+    --implemented "$IMPL" "$@" 2>/dev/null | sed -n "s/^${key}=//p"
+}
+
+# library объявляет `sast-sonar: B`, а исполняющего шага у стадии нет ни в
+# одном воркфлоу обоих репо — ровно тот случай, ради которого выход заведён.
+got="$(unimpl_of unimplemented-blocking "" library)"
+if printf '%s' "$got" | tr ',' '\n' | grep -qx 'sast-sonar'; then
+  echo "  ok   нереализованная BLOCKING-стадия названа отдельно"; n_ok=$((n_ok + 1))
+else
+  echo "  FAIL sast-sonar (B в library) не попал в unimplemented-blocking: '$got'"; fail=1
+fi
+
+# Тот же профиль объявляет `pii-gate: A`. Общий список её несёт, список
+# блокирующих — нет: иначе advisory и blocking снова неразличимы.
+got_all="$(unimpl_of unimplemented "" library)"
+if printf '%s' "$got_all" | tr ',' '\n' | grep -qx 'pii-gate' &&
+   ! printf '%s' "$got" | tr ',' '\n' | grep -qx 'pii-gate'; then
+  echo "  ok   нереализованная advisory-стадия в общем списке, но не среди blocking"; n_ok=$((n_ok + 1))
+else
+  echo "  FAIL pii-gate (A в library): всего='$got_all' blocking='$got'"; fail=1
+fi
+
+# Выключил сам — знает сам. Строка про такую стадию приучала бы пропускать
+# весь вердикт.
+if ! unimpl_of unimplemented "pii-gate" library | tr ',' '\n' | grep -qx 'pii-gate'; then
+  echo "  ok   явный skip вычитается из списка"; n_ok=$((n_ok + 1))
+else
+  echo "  FAIL skip=pii-gate всё равно попал в unimplemented"; fail=1
+fi
+
+# Release-стадия — вне контракта B/A/off, вердикта Gate про неё нет. Первая
+# редакция фильтровала по `!= off`, и light-конвейер (`--release-stage` ему
+# не передаётся) объявлял `sbom` неисполняемым.
+if ! unimpl_of unimplemented "" library | tr ',' '\n' | grep -qx 'sbom'; then
+  echo "  ok   release-стадия не считается неисполняемой"; n_ok=$((n_ok + 1))
+else
+  echo "  FAIL sbom (режим R) попал в unimplemented"; fail=1
+fi
+
+# Контроль, обязанный молчать: стадия, которую конвейер исполняет, в списке
+# делать нечего. Без него правило «всё, чего нет в implemented» прошло бы
+# проверку, даже если бы список складывался из чего попало.
+if ! unimpl_of unimplemented "" library | tr ',' '\n' | grep -qx 'secrets'; then
+  echo "  ok   реализованная стадия в списке не появляется"; n_ok=$((n_ok + 1))
+else
+  echo "  FAIL secrets (реализована) попала в unimplemented"; fail=1
+fi
+
+echo
 if [ "$fail" = "0" ]; then
   echo "OK: $n_ok/$n_ok — опечатка падает, верное имя проходит, режимы разрешаются."
 else
