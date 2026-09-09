@@ -5,6 +5,8 @@ selftest). Формат — [Keep a Changelog], версии — semver.
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-09-09
+
 ### Added
 - **Класс `app-client`** (приватный `devsecops-pipeline#34`) — профиль под
   клиентские приложения (`profiles/app-client.yml`): `container: off`,
