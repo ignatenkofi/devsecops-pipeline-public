@@ -14,6 +14,12 @@ selftest). Формат — [Keep a Changelog], версии — semver.
   владелец, сторож только напоминает.
 
 ### Changed
+- **`actions/semgrep` называет разъехавшиеся пины по имени** (приватный
+  `devsecops-pipeline#62`): если версия в `PATH` раннера не равна пину и
+  pip установить не смог (PEP 668 на ферме), `::error::` перечисляет обе
+  версии и роль фермы `polygon-iac`, которую надо пересобрать, вместо
+  голого `externally-managed-environment`. Тело ночного PR бампа помечает
+  строку semgrep как связанную с шаблоном фермы.
 - **cosign 2.4.1 → 3.1.3 в фикстуре** `tests/negative/assert-cosign-sums.sh`
   (близнец приватного `devsecops-pipeline#56`). Мажор без смены вызова:
   `verify-blob --certificate/--signature` в 3.x объявлены deprecated, но
