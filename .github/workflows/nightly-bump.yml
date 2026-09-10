@@ -239,6 +239,12 @@ jobs:
           | semgrep | ${{ fromJSON(steps.versions.outputs.result).semgrep.cur }} | ${{ fromJSON(steps.versions.outputs.result).semgrep.target }} |
           | osv-scanner | ${{ fromJSON(steps.versions.outputs.result).osv.cur }} | ${{ fromJSON(steps.versions.outputs.result).osv.target }} |
 
+          Строка **semgrep** связана с шаблоном фермы: пин зеркалится в
+          \`polygon-iac\` \`ansible/roles/base/tasks/main.yml\` (\`semgrep==…\`),
+          и переезд \`v1\` с новым пином без пересборки шаблона роняет
+          \`sast-semgrep\` у всех потребителей на ферме
+          (devsecops-pipeline#62). Пересборка — до переезда тега, не после.
+
           Версии-кандидаты прогнаны ДО правки пинов: негатив-фикстуры ловятся
           (\`tests/negative/\`) и сами стадии запускаются на новых версиях —
           [прогон](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}).
