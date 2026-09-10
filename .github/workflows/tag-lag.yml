@@ -1,0 +1,143 @@
+name: tag-lag
+# Сторож отставания подвижного тега `v1` от `main` (#54; ADR 0006,
+# дополнение 2026-09-10). Близнец — тот же файл в приватном devsecops-pipeline
+# (раннер фермы и health-issue через `@v1` вместо локального пути).
+#
+# ЗАЧЕМ. Потребители пинятся на `@v1`, а переезд тега — ручное действие
+# владельца по docs/runbooks/release.md, о котором ничто не напоминало. Итог
+# #54: v1 = db7314a от 09.08 при main 09.09 — месяц два контроля, написанные
+# в reusable-джобе «чтобы закрыть всех потребителей разом», не доехали ни до
+# кого. Модель доставки не меняется (v1 подвижный, тег двигает владелец):
+# не хватало не автоматики, а сигнала о просрочке.
+#
+# ЧТО СЧИТАЕТСЯ ОТСТАВАНИЕМ. Два условия, каждое само по себе заводит issue:
+#   1. `v1` не совпадает ни с одним релизным тегом `vX.Y.Z` — нарушение
+#      правила шага 6 ранбука (так было в обоих репо до 1.5.0);
+#   2. в `main` есть коммиты после `v1` по путям, которые видит потребитель
+#      (`.github/workflows/pipeline*.yml`, `actions/`, `profiles/`), и
+#      старшему из них ≥ GRACE_DAYS дней. Тесты, линты и доки конвейера
+#      потребителю невидимы и отставанием не считаются.
+#   Льгота 14 дней: ночные PATCH-бампы пинов приходят еженедельно, релиз на
+#   каждый — шум; отставание #54 было вдвое с лишним длиннее льготы.
+#
+# Сигнал — issue через health-issue: одна тема = одна issue, повтор
+# обновляет комментарием, догнавший тег закрывает её сам. Второй
+# health-issue под `if: always()` — признак живости самого сторожа (#19,
+# tests/lint/assert-schedule-liveness.py).
+on:
+  schedule:
+    - cron: "17 6 * * 1" # понедельник, после ночных бампов недели
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write # признак живости: отставание и отказ сторожа видны снаружи
+
+env:
+  GRACE_DAYS: "14"
+  LAG_TITLE: "tag-lag: подвижный тег v1 отстал от main"
+  HEALTH_TITLE: "tag-lag: сторож отставания тега v1 не отработал"
+
+jobs:
+  tag-lag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: "Сравнить v1 с main по путям, которые видит потребитель"
+        id: lag
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Сравниваем с origin/main, а не с HEAD: расписание запускается на
+          # main, но теги и ветка берутся с origin явно, чтобы вердикт не
+          # зависел от того, что именно checkout положил в рабочее дерево.
+          git fetch --quiet origin main 'refs/tags/*:refs/tags/*'
+          v1=$(git rev-parse --verify --quiet 'refs/tags/v1^{commit}') \
+            || { echo "::error::тега v1 нет — потребителям не на что ссылаться"; exit 1; }
+          main=$(git rev-parse origin/main)
+          release=$(git tag --points-at "$v1" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+
+          paths=('.github/workflows/pipeline*.yml' actions profiles)
+          commits=$(git log --format='%h %cs %s' "$v1..$main" -- "${paths[@]}")
+          count=$(printf '%s' "$commits" | grep -c . || true)
+          # Возраст — из git (%ct), а не через `date -d`: без зависимости от GNU date.
+          oldest=$(git log --format=%cs "$v1..$main" -- "${paths[@]}" | tail -n 1)
+          oldest_ts=$(git log --format=%ct "$v1..$main" -- "${paths[@]}" | tail -n 1)
+          age=0
+          if [ -n "$oldest_ts" ]; then
+            age=$(( ( $(date -u +%s) - oldest_ts ) / 86400 ))
+          fi
+
+          reasons=()
+          if [ -z "$release" ]; then
+            reasons+=("- \`v1\` → \`${v1:0:7}\` не совпадает ни с одним релизным тегом \`vX.Y.Z\` (правило шага 6 \`docs/runbooks/release.md\`).")
+          fi
+          if [ "$count" -gt 0 ] && [ "$age" -ge "$GRACE_DAYS" ]; then
+            reasons+=("- В \`main\` ${count} коммит(ов) после \`v1\` по потребительским путям; старший — от ${oldest} (${age} дн. при льготе ${GRACE_DAYS}).")
+          fi
+
+          state=close
+          if [ "${#reasons[@]}" -gt 0 ]; then state=open; fi
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+
+          delim="body-$RANDOM-$RANDOM"
+          {
+            echo "body<<$delim"
+            echo "Подвижный тег \`v1\` (\`${v1:0:7}\`, релизный тег: \`${release:-нет}\`) отстал от \`main\` (\`${main:0:7}\`)."
+            echo
+            if [ "${#reasons[@]}" -gt 0 ]; then printf '%s\n' "${reasons[@]}"; fi
+            echo
+            echo "Коммиты \`v1..main\` по \`.github/workflows/pipeline*.yml\`, \`actions/\`, \`profiles/\`:"
+            echo
+            echo '```'
+            printf '%s\n' "$commits" | sed -n '1,40p'
+            echo '```'
+            echo
+            echo "Что сделать: релиз по \`docs/runbooks/release.md\` (публичный компаньон первым), переезд \`v1\` на новый \`vX.Y.Z\`. Issue закроется сама следующим прогоном сторожа."
+            echo
+            echo "[Прогон сторожа](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### tag-lag"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| v1 | \`${v1:0:7}\` (${release:-не релизный тег}) |"
+            echo "| main | \`${main:0:7}\` |"
+            echo "| коммитов по потребительским путям | ${count} |"
+            echo "| возраст старшего, дн. | ${age} (льгота ${GRACE_DAYS}) |"
+            echo "| вердикт | ${state} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$state" = close ] && [ "$count" -gt 0 ]; then
+            echo "::notice::v1 отстаёт на ${count} коммит(ов), но старшему ${age} дн. < ${GRACE_DAYS} — в пределах льготы"
+          fi
+
+      - name: "Отставание v1: завести issue или снять, если тег догнал"
+        uses: ./actions/health-issue
+        with:
+          state: ${{ steps.lag.outputs.state }}
+          title: ${{ env.LAG_TITLE }}
+          token: ${{ github.token }}
+          body: ${{ steps.lag.outputs.body }}
+          close-comment: "Тег v1 догнал main по потребительским путям — закрыто сторожем tag-lag."
+
+      - name: "Сторож виден снаружи: падение заводит issue, зелёный снимает"
+        if: always()
+        uses: ./actions/health-issue
+        with:
+          state: ${{ job.status }}
+          title: ${{ env.HEALTH_TITLE }}
+          token: ${{ github.token }}
+          close-comment: "Сторож tag-lag снова отработал — закрыто автоматически."
+          body: |
+            Еженедельный сторож `tag-lag` завершился неуспехом: отставание тега
+            `v1` от `main` никто не проверяет, пока это не починено.
+
+            [Упавший прогон](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
