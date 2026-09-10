@@ -5,6 +5,8 @@ selftest). Формат — [Keep a Changelog], версии — semver.
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-09-10
+
 ### Added
 - **`resolve.py`: класс «стадия по событию» (`--event-stages`)** — для
   стадии `mobile-scan` приватного `devsecops-pipeline#35` (MobSF над `.ipa`
