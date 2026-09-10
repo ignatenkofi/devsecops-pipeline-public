@@ -105,19 +105,38 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           {
+            echo "release=${release:-}"
+            echo "count=$count"
+            echo "age=$age"
+            echo "v1=${v1:0:7}"
+            echo "main=${main:0:7}"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$state" = close ] && [ "$count" -gt 0 ]; then
+            echo "::notice::v1 отстаёт на ${count} коммит(ов), но старшему ${age} дн. < ${GRACE_DAYS} — в пределах льготы"
+          fi
+
+      - name: "Сводка прогона (и на упавшем тоже — assert-composite-hygiene)"
+        if: always()
+        shell: bash
+        env:
+          V1: ${{ steps.lag.outputs.v1 }}
+          MAIN: ${{ steps.lag.outputs.main }}
+          RELEASE: ${{ steps.lag.outputs.release }}
+          COUNT: ${{ steps.lag.outputs.count }}
+          AGE: ${{ steps.lag.outputs.age }}
+          STATE: ${{ steps.lag.outputs.state }}
+        run: |
+          {
             echo "### tag-lag"
             echo
             echo "| | |"
             echo "|---|---|"
-            echo "| v1 | \`${v1:0:7}\` (${release:-не релизный тег}) |"
-            echo "| main | \`${main:0:7}\` |"
-            echo "| коммитов по потребительским путям | ${count} |"
-            echo "| возраст старшего, дн. | ${age} (льгота ${GRACE_DAYS}) |"
-            echo "| вердикт | ${state} |"
+            echo "| v1 | \`${V1:-?}\` (${RELEASE:-не релизный тег}) |"
+            echo "| main | \`${MAIN:-?}\` |"
+            echo "| коммитов по потребительским путям | ${COUNT:-?} |"
+            echo "| возраст старшего, дн. | ${AGE:-?} (льгота ${GRACE_DAYS}) |"
+            echo "| вердикт | ${STATE:-шаг сравнения не завершился} |"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$state" = close ] && [ "$count" -gt 0 ]; then
-            echo "::notice::v1 отстаёт на ${count} коммит(ов), но старшему ${age} дн. < ${GRACE_DAYS} — в пределах льготы"
-          fi
 
       - name: "Отставание v1: завести issue или снять, если тег догнал"
         uses: ./actions/health-issue
