@@ -11,7 +11,8 @@
     "file": "actions/semgrep/action.yml",
     "input": "version",
     "source": "pypi",
-    "id": "semgrep"
+    "id": "semgrep",
+    "autobump": false
   },
   {
     "name": "osv",
