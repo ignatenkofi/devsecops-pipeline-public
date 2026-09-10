@@ -13,6 +13,11 @@ name: nightly-bump
 # 2. Крон-время дрейфует: заявленные 02:43 реально стреляют около 05:30–05:50
 #    UTC (история прогонов workflow — единственный источник правды).
 # 3. Мажорные бампы job'ом НЕ применяются (см. ниже) — только сообщаются.
+# 4. Пин semgrep job'ом НЕ двигается вовсе (`autobump: false` в pins.json):
+#    он зеркалится в образе фермы polygon-iac, и переезд v1 с новым пином
+#    без пересборки шаблона роняет sast-semgrep у всех потребителей на ферме
+#    (devsecops-pipeline#62, 1.5.0). Дрейф сообщается issue, двигают руками —
+#    роль фермы и пин одним заходом.
 #
 # Политика мержа (тот же #8): минорные бампы владелец мержит пачкой; мажорные
 # — только с разбором changelog апстрима. Раньше job складывал минор и мажор в
@@ -36,6 +41,7 @@ concurrency: nightly-bump
 env:
   HEALTH_TITLE: "nightly-bump: ночной прогон падает"
   MAJOR_TITLE: "nightly-bump: мажорный бамп ждёт разбора changelog"
+  MANUAL_TITLE: "nightly-bump: пин semgrep отстал от апстрима — вместе с ролью фермы"
 
 jobs:
   bump:
@@ -239,11 +245,13 @@ jobs:
           | semgrep | ${{ fromJSON(steps.versions.outputs.result).semgrep.cur }} | ${{ fromJSON(steps.versions.outputs.result).semgrep.target }} |
           | osv-scanner | ${{ fromJSON(steps.versions.outputs.result).osv.cur }} | ${{ fromJSON(steps.versions.outputs.result).osv.target }} |
 
-          Строка **semgrep** связана с шаблоном фермы: пин зеркалится в
-          \`polygon-iac\` \`ansible/roles/base/tasks/main.yml\` (\`semgrep==…\`),
-          и переезд \`v1\` с новым пином без пересборки шаблона роняет
-          \`sast-semgrep\` у всех потребителей на ферме
-          (devsecops-pipeline#62). Пересборка — до переезда тега, не после.
+          Строка **semgrep** здесь всегда «было = стало»: пин помечен
+          \`autobump: false\` и ночью не двигается. Он зеркалится в образе
+          фермы \`polygon-iac\` (\`ansible/roles/base/tasks/main.yml\`,
+          \`semgrep==…\`), и переезд \`v1\` с новым пином без пересборки
+          шаблона роняет \`sast-semgrep\` у всех потребителей на ферме
+          (devsecops-pipeline#62). Отставание от апстрима сообщается отдельной
+          issue; двигать — руками, роль и пин одним заходом.
 
           Версии-кандидаты прогнаны ДО правки пинов: негатив-фикстуры ловятся
           (\`tests/negative/\`) и сами стадии запускаются на новых версиях —
@@ -377,6 +385,39 @@ jobs:
             Что сделать: прочитать changelog апстрима, поднять пин руками в
             `actions/*/action.yml`, прогнать selftest. Issue закроется сама,
             когда пин догонит апстрим.
+
+            [Ночной прогон](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+      - name: "Пин semgrep: завести issue о дрейфе или снять, если догнал"
+        uses: ./actions/health-issue
+        with:
+          state: ${{ steps.versions.outputs.has-manual == 'true' && 'open' || 'close' }}
+          title: ${{ env.MANUAL_TITLE }}
+          token: ${{ github.token }}
+          close-comment: "Пин semgrep догнал апстрим — закрыто ночным прогоном."
+          body: |
+            Апстрим ушёл вперёд у пина, помеченного `autobump: false`.
+
+            Отстали: ${{ steps.versions.outputs.manual }}
+
+            **Почему не бампится само.** Пин `actions/semgrep` зеркалится в
+            образе фермы `polygon-iac` (`ansible/roles/base/tasks/main.yml`,
+            `semgrep==…`): на noble системный pip закрыт PEP 668, и при
+            расхождении стадия `sast-semgrep` у **каждого** потребителя на
+            ферме падает, а не доустанавливает версию. Ночной бамп двигал пин
+            конвейера сам, ферму — никто; так 1.5.0 уронил всех потребителей
+            на ферме на полсуток (devsecops-pipeline#62).
+
+            **Что сделать — одним заходом, в этом порядке.**
+            1. Поднять `semgrep==…` в роли `base` `polygon-iac`, пересобрать
+               шаблон фермы (хендофф в `polygon-iac`).
+            2. Поднять `version` в `actions/semgrep/action.yml` здесь,
+               прогнать selftest, выпустить релиз.
+            3. Переезд `v1` — только после пересборки шаблона (runbook
+               `docs/runbooks/release.md` приватного репо, раздел «Перед
+               переездом публичного `v1`: пин semgrep равен роли фермы»).
+
+            Issue закроется сама, когда пин догонит апстрим.
 
             [Ночной прогон](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
