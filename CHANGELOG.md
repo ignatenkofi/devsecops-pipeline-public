@@ -6,6 +6,15 @@ selftest). Формат — [Keep a Changelog], версии — semver.
 ## [Unreleased]
 
 ### Added
+- **`resolve.py`: класс «стадия по событию» (`--event-stages`)** — для
+  стадии `mobile-scan` приватного `devsecops-pipeline#35` (MobSF над `.ipa`
+  из Xcode Cloud, свой воркфлоу на `repository_dispatch`, ADR 0007 там же).
+  Контракт B/A/off тот же, что у реализованных стадий; отличие — стадию
+  исполняет другой воркфлоу того же репо, и там, где флаг передан, вердикт
+  PR-конвейера не объявляет её неисполняемой. Профили всех классов
+  объявляют `mobile-scan` (`A` только у `app-client`); light-конвейер флага
+  не передаёт и для `app-client` честно называет её неисполняемой. Файл —
+  близнец, гард `tests/negative/assert-profile-resolve.sh` расширен.
 - **Сторож отставания `v1`** (близнец приватного `devsecops-pipeline#54`) —
   `.github/workflows/tag-lag.yml`, еженедельно: если `v1` не совпадает ни с
   одним `vX.Y.Z` или отстал от `main` по путям, которые видит потребитель
