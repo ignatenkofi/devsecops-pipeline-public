@@ -11,6 +11,9 @@ selftest). Формат — [Keep a Changelog], версии — semver.
   `verify-blob --certificate/--signature` в 3.x объявлены deprecated, но
   работают до v4 (sigstore/cosign#4822, #4838); 3.1.3 закрывает
   GHSA-fx35-mq7g-6g98.
+- **Шапка `profiles/app-client.yml`**: языковые стадии под Swift исполняет
+  Xcode Cloud, не конвейер (ADR 0007 приватного `devsecops-pipeline`,
+  2026-09-10); `mobile-scan` придёт как Linux-стадия над артефактом.
 
 ## [1.5.0] — 2026-09-09
 
