@@ -150,6 +150,61 @@ else
   echo "  FAIL secrets (реализована) попала в unimplemented"; fail=1
 fi
 
+
+# Стадия по событию (`--event-stages`, приватный ADR 0007 / #35): исполняет
+# её другой воркфлоу этого же репо на своём триггере, поэтому в вердикте
+# PR-конвейера она не «неисполняемая» — но только там, где флаг передан.
+# Публичный light-конвейер флага не передаёт и исполняет её не больше, чем
+# pii-gate: у него она в списке остаётся, и это правда с другой стороны.
+echo
+echo "--- Стадия по событию: свой режим, не «неисполняемая» там, где исполняется ---"
+event_mode() { # event_mode <SKIP> <EXTRA> <класс>
+  SKIP="$1" EXTRA="$2" python3 "$resolve" "$profiles/$3.yml" "$profiles" \
+    --implemented "$IMPL" --event-stages mobile-scan 2>/dev/null | sed -n 's/^mobile-scan=//p'
+}
+got="$(event_mode "" "" app-client)"
+if [ "$got" = "A" ]; then
+  echo "  ok   app-client: mobile-scan=A отдельной строкой"; n_ok=$((n_ok + 1))
+else
+  echo "  FAIL app-client: mobile-scan ожидал A, получил '$got'"; fail=1
+fi
+got="$(event_mode "" "" library)"
+if [ "$got" = "off" ]; then
+  echo "  ok   library: mobile-scan=off (артефакта Xcode Cloud нет)"; n_ok=$((n_ok + 1))
+else
+  echo "  FAIL library: mobile-scan ожидал off, получил '$got'"; fail=1
+fi
+got="$(event_mode "mobile-scan" "" app-client)"
+if [ "$got" = "off" ]; then
+  echo "  ok   skip выключает стадию по событию"; n_ok=$((n_ok + 1))
+else
+  echo "  FAIL skip=mobile-scan не выключил: '$got'"; fail=1
+fi
+got="$(event_mode "" "mobile-scan" library)"
+if [ "$got" = "A" ]; then
+  echo "  ok   extra включает стадию по событию как advisory"; n_ok=$((n_ok + 1))
+else
+  echo "  FAIL extra=mobile-scan не включил: '$got'"; fail=1
+fi
+if ! unimpl_of unimplemented "" app-client --event-stages mobile-scan | tr ',' '\n' | grep -qx 'mobile-scan'; then
+  echo "  ok   с флагом стадия по событию не считается неисполняемой"; n_ok=$((n_ok + 1))
+else
+  echo "  FAIL mobile-scan попал в unimplemented при --event-stages"; fail=1
+fi
+if unimpl_of unimplemented "" app-client | tr ',' '\n' | grep -qx 'mobile-scan'; then
+  echo "  ok   без флага (light) стадия по событию честно в списке неисполняемых"; n_ok=$((n_ok + 1))
+else
+  echo "  FAIL без --event-stages mobile-scan (A в app-client) не попал в unimplemented"; fail=1
+fi
+# Имя стадии по событию — известное: skip по нему не должен падать как опечатка.
+out="$(SKIP="mobile-scan" EXTRA="" python3 "$resolve" "$profiles/library.yml" "$profiles" \
+       --implemented "$IMPL" --event-stages mobile-scan 2>"$TMP_ERR")"; rc=$?
+if [ "$rc" = "0" ]; then
+  echo "  ok   имя стадии по событию известно валидации (rc=0)"; n_ok=$((n_ok + 1))
+else
+  echo "  FAIL skip=mobile-scan отвергнут как опечатка (rc=$rc)"; sed 's/^/       /' "$TMP_ERR"; fail=1
+fi
+
 echo
 if [ "$fail" = "0" ]; then
   echo "OK: $n_ok/$n_ok — опечатка падает, верное имя проходит, режимы разрешаются."

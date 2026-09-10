@@ -21,7 +21,8 @@ jobs:
           python3 - <<'PY'
           import glob, sys, yaml
           KNOWN = {"secrets","pii-gate","sast-semgrep","sast-sonar","sca",
-                   "docs-lint","course-lint","container","sbom","dast"}
+                   "docs-lint","course-lint","container","sbom","dast",
+                   "mobile-scan"}
           MODES = {"B","A","R","off"}
           CORE = {"library","service","docs-shelf","course-content","app-client"}
           # vuln-demo — санкционированный класс-исключение: намеренно уязвимое

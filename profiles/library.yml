@@ -14,3 +14,4 @@ stages:
   container: A       # M1 (если есть Dockerfile)
   sbom: R            # M1
   dast: "off"
+  mobile-scan: "off" # артефакта Xcode Cloud нет (#35)

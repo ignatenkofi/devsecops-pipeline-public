@@ -10,9 +10,10 @@
 # исполняет Xcode Cloud из подписки владельца, а не конвейер (ADR 0007
 # приватного репо, 2026-09-10): отдельный status check на PR, который
 # потребитель требует в branch protection рядом с `security`. Стадия
-# mobile-scan (#35) придёт как Linux-стадия над артефактом из Xcode Cloud.
-# До неё содержательная стадия для Swift-репо одна — secrets (sast-semgrep
-# без Swift-правил вхолостую, #33).
+# mobile-scan (#35) — Linux-стадия над артефактом из Xcode Cloud: не шаг
+# PR-конвейера, а свой воркфлоу на `repository_dispatch` (ADR 0007).
+# Помимо неё содержательная стадия для Swift-репо одна — secrets
+# (sast-semgrep без Swift-правил вхолостую, #33).
 class: app-client
 stages:
   secrets: B
@@ -25,3 +26,4 @@ stages:
   container: "off"   # артефакт — .app/.ipa, не образ
   sbom: R            # M1
   dast: "off"        # веб-поверхности нет
+  mobile-scan: A     # #35: MobSF над .ipa из Xcode Cloud, воркфлоу события pipeline-mobile.yml

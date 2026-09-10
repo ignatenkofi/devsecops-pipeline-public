@@ -14,13 +14,25 @@
 
 Вход:
     resolve.py <профиль> <каталог-профилей> --implemented a,b,c
-               [--release-stage sbom]
+               [--release-stage sbom] [--event-stages mobile-scan]
     SKIP / EXTRA — через запятую, из окружения (inputs action'а)
 Выход:
     строки `<стадия>=<режим>` в stdout (уходят в $GITHUB_OUTPUT)
     диагностика — в stderr
 Коды:
     0 — разрешено, 2 — неизвестное имя стадии в skip/extra.
+
+ТРИ КЛАССА СТАДИЙ. `--implemented` — стадии, которые исполняет воркфлоу
+PR/push этого репо, их режимы читает Gate. `--release-stage` — стадия вне
+контракта B/A/off (режим R), её читает release-джоб. `--event-stages` —
+стадии по событию (mobile-scan над артефактом Xcode Cloud, ADR 0007
+приватного репо): контракт B/A/off тот же, но исполняет их ДРУГОЙ воркфлоу
+этого же репо на своём триггере (`repository_dispatch`), и вердикт
+PR-конвейера не должен объявлять их неисполняемыми — иначе каждый PR
+клиентского репо носил бы предупреждение о стадии, которая исполняется.
+Объявить такую стадию в `--implemented` нельзя по той же причине с другой
+стороны: Gate счёл бы её своей и ждал бы от неё исход шага, которого в
+PR-прогоне нет.
 
 ПОЧЕМУ ВАЛИДАЦИЯ ИМЁН. `skip-stages` раньше не проверял, что переданное имя
 вообще существует: неизвестное просто не совпадало ни с чем и молча
@@ -49,7 +61,8 @@ def parse_list(raw: str) -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
-def known_stage_names(profiles_dir: Path, implemented: list[str], release: str) -> set[str]:
+def known_stage_names(profiles_dir: Path, implemented: list[str], release: str,
+                      event: list[str]) -> set[str]:
     """Имена стадий, известные конвейеру: реализованные ∪ ВСЕ профили.
 
     Читаются все профили, а не только текущий: `skip-stages: container` на
@@ -58,7 +71,7 @@ def known_stage_names(profiles_dir: Path, implemented: list[str], release: str) 
     стадии, объявленной в профиле, но ещё не реализованной (M1/M2), обязано
     приниматься: потребитель не должен ждать реализации, чтобы её выключить.
     """
-    names = set(implemented)
+    names = set(implemented) | set(event)
     if release:
         names.add(release)
     for path in sorted(profiles_dir.glob("*.yml")):
@@ -79,11 +92,15 @@ def main(argv: list[str]) -> int:
                     help="через запятую: стадии, реализованные в ЭТОМ репо")
     ap.add_argument("--release-stage", default="",
                     help="стадия вне контракта B/A/off (режим R, release-only)")
+    ap.add_argument("--event-stages", default="",
+                    help="через запятую: стадии по событию — исполняет другой "
+                         "воркфлоу этого репо, контракт B/A/off тот же")
     args = ap.parse_args(argv[1:])
 
     profiles_dir = args.profiles_dir or args.profile.parent
     implemented = [s for s in args.implemented.split(",") if s.strip()]
     release = args.release_stage.strip()
+    event = [s for s in args.event_stages.split(",") if s.strip()]
 
     profile = yaml.safe_load(args.profile.read_text(encoding="utf-8")) or {}
     stages = profile.get("stages") or {}
@@ -91,7 +108,7 @@ def main(argv: list[str]) -> int:
     skip = parse_list(os.environ.get("SKIP", ""))
     extra = parse_list(os.environ.get("EXTRA", ""))
 
-    known = known_stage_names(profiles_dir, implemented, release)
+    known = known_stage_names(profiles_dir, implemented, release, event)
     unknown = sorted((skip | extra) - known)
     if unknown:
         print(
@@ -103,7 +120,10 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
-    for name in implemented:
+    # Стадии по событию разрешаются тем же контрактом, что и реализованные:
+    # skip выключает, extra включает как advisory. Разница — не в режиме,
+    # а в том, КТО его читает: не Gate PR-конвейера, а воркфлоу события.
+    for name in implemented + event:
         mode = norm(stages.get(name, "off"))
         if name in skip:
             mode = "off"
@@ -138,7 +158,11 @@ def main(argv: list[str]) -> int:
     # Явный `skip-stages` из списка вычитается: потребитель, выключивший
     # стадию сам, уже знает, что её нет; строка про неё приучала бы
     # пропускать весь вердикт.
-    accounted = set(implemented) | ({release} if release else set())
+    # Стадия по событию учтена: её исполняет другой воркфлоу этого репо, и
+    # «не исполняется» про неё — неправда. Конвейер, которому `--event-stages`
+    # не передан (публичный light), её и правда не исполняет — там она
+    # в списке остаётся, и это тоже правда.
+    accounted = set(implemented) | set(event) | ({release} if release else set())
     pending = {
         s: norm(m)
         for s, m in stages.items()
