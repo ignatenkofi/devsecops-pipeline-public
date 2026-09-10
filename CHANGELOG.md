@@ -5,6 +5,14 @@ selftest). Формат — [Keep a Changelog], версии — semver.
 
 ## [Unreleased]
 
+### Added
+- **Сторож отставания `v1`** (близнец приватного `devsecops-pipeline#54`) —
+  `.github/workflows/tag-lag.yml`, еженедельно: если `v1` не совпадает ни с
+  одним `vX.Y.Z` или отстал от `main` по путям, которые видит потребитель
+  (`pipeline*.yml`, `actions/`, `profiles/`), дольше 14 дней — issue через
+  `./actions/health-issue`; догнавший тег закрывает её сам. Тег двигает
+  владелец, сторож только напоминает.
+
 ### Changed
 - **cosign 2.4.1 → 3.1.3 в фикстуре** `tests/negative/assert-cosign-sums.sh`
   (близнец приватного `devsecops-pipeline#56`). Мажор без смены вызова:
