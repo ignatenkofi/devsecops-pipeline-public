@@ -36,6 +36,12 @@
 #  15. --member, которого в архиве нет → отказ, а не «успех с пустым dest»
 #  16. установлены ИМЕННО сверенные байты, а не скачанные повторно
 #  17. TLS не отключён: самоподписанный https обязан быть отвергнут
+#  18. транзиент раздатчика (503, 503, 200) → повтор, ставятся сверенные
+#      байты; сервер видит РОВНО 3 запроса
+#  19. 404 → отказ с ПЕРВОГО запроса, ровно 1 запрос, сообщение называет
+#      URL и говорит «ЗАГРУЗКИ»: снятый или переименованный ассет обязан
+#      краснеть сразу, а отказ загрузки не имеет права выглядеть как
+#      расхождение суммы
 set -euo pipefail
 
 FV="${1:-actions/fetch-verified/fetch_verified.sh}"
@@ -306,4 +312,80 @@ bash "$FV" --url "https://127.0.0.1:$tls_port/asset" --sha256 "$tls_body_sum" \
 [ "$rc" -ne 0 ] || fail "самоподписанный сертификат принят — проверка TLS отключена"
 [ ! -e "$WORK/tls/tool" ] || fail "файл установлен с недоверенного https"
 
-echo "OK: fetch-verified ставит только сверенные байты — 17 случаев, три режима, два источника суммы"
+# ------------------------------------------------------------------ 18, 19
+# Граница повтора. Повтор в загрузчике — ослабление ровно до тех пор, пока
+# никто не проверил, ЧТО он повторяет: дописать `--retry-all-errors` — правка
+# на одно слово, и «пережить 503» превращается в «десять секунд молчать про
+# снятый ассет». Поэтому случая два и они парные: транзиент обязан быть
+# пережит, 404 — отвергнут с первого запроса. Критерий — счётчик запросов на
+# стороне сервера; время замерять бессмысленно, оно плавает.
+cat > "$WORK/net.py" <<'PYSRV'
+import hashlib, http.server, socketserver
+PAYLOAD = b'#!/bin/sh\necho retried-ok\n'
+hits = {}
+
+class H(http.server.BaseHTTPRequestHandler):
+    def _empty(self, code):
+        self.send_response(code)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self):
+        hits[self.path] = hits.get(self.path, 0) + 1
+        if self.path == "/SUMS":
+            body = (hashlib.sha256(PAYLOAD).hexdigest() + "  asset\n").encode()
+        elif self.path == "/asset":
+            # Два отказа подряд, затем успех: ровно столько попыток, сколько
+            # даёт --retry 3, и ни одной лишней.
+            if hits[self.path] <= 2:
+                return self._empty(503)
+            body = PAYLOAD
+        elif self.path == "/gone":
+            return self._empty(404)
+        elif self.path == "/hits":
+            body = ("%d %d" % (hits.get("/asset", 0), hits.get("/gone", 0))).encode()
+        else:
+            return self._empty(400)
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+srv = socketserver.TCPServer(("127.0.0.1", 0), H)
+print(srv.server_address[1], flush=True)
+srv.serve_forever()
+PYSRV
+python3 "$WORK/net.py" > "$WORK/net.port" 2>"$WORK/net.err" &
+net_pid=$!
+trap 'kill "$flip_pid" "$tls_pid" "$net_pid" 2>/dev/null || true; rm -rf "$WORK"' EXIT
+for _ in $(seq 1 50); do [ -s "$WORK/net.port" ] && break; sleep 0.1; done
+net_port="$(head -1 "$WORK/net.port")"
+[ -n "$net_port" ] || fail "сервер повторов не поднялся: $(cat "$WORK/net.err")"
+base="http://127.0.0.1:$net_port"
+
+rc=0
+bash "$FV" --url "$base/asset" --sums-url "$base/SUMS" \
+  --dest "$WORK/retry" --output tool >"$WORK/retry.log" 2>&1 || rc=$?
+[ "$rc" -eq 0 ] || fail "транзиент не пережит (rc=$rc): $(cat "$WORK/retry.log")"
+[ "$("$WORK/retry/tool")" = "retried-ok" ] || fail "после повтора установлен не тот файл"
+
+rc=0
+bash "$FV" --url "$base/gone" --sums-url "$base/SUMS" \
+  --dest "$WORK/gone" --output tool >"$WORK/gone.log" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "404 принят как успешная загрузка"
+[ ! -e "$WORK/gone/tool" ] || fail "файл установлен после 404"
+grep -q "$base/gone" "$WORK/gone.log" \
+  || fail "отказ загрузки не назвал URL: $(cat "$WORK/gone.log")"
+grep -q "ЗАГРУЗКИ" "$WORK/gone.log" \
+  || fail "отказ загрузки неотличим от расхождения суммы: $(cat "$WORK/gone.log")"
+
+read -r asset_hits gone_hits <<<"$(curl -sS "$base/hits")"
+[ "$asset_hits" = "3" ] \
+  || fail "транзиент: ожидал 3 запроса (два 503 и успех), сервер видел $asset_hits"
+[ "$gone_hits" = "1" ] \
+  || fail "404 повторялся: сервер видел $gone_hits запросов вместо одного — повтор глотает снятый ассет"
+
+echo "OK: fetch-verified ставит только сверенные байты — 19 случаев, три режима, два источника суммы"
