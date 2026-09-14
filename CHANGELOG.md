@@ -5,6 +5,20 @@ selftest). Формат — [Keep a Changelog], версии — semver.
 
 ## [Unreleased]
 
+### Changed
+- **semgrep 1.176.1 → 1.177.0** (`actions/semgrep/action.yml`) — ручной бамп
+  пина, выведенного из ночного автобампа (`autobump: false`, приватный
+  `devsecops-pipeline#62`). Пин зеркалится в роли `base` фермы `polygon-iac`
+  (`ansible/roles/base/tasks/main.yml`, `semgrep==…`), поэтому двигается
+  одним заходом с ней: хендофф в `polygon-iac` от 2026-09-14, переезд `v1` —
+  только после пересборки шаблона фермы. Кандидат прогнан на контрактах
+  стадии до правки пина (semgrep 1.177.0 с PyPI, offline-пак `rules/`):
+  `--error` даёт rc=1 на эталонном `eval()`, `paths.scanned` в
+  `--json-output` на месте и на применимом репозитории (1 файл), и на
+  неприменимом (0 файлов, Swift), SARIF 2.1.0. В апстриме 1.177.0 —
+  Supply Chain (Bazel, Gradle) и производительность префильтра; CLI, коды
+  возврата и форма отчёта не менялись.
+
 ## [1.6.0] — 2026-09-10
 
 ### Added
