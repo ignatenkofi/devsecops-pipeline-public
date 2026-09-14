@@ -15,7 +15,7 @@ inputs:
     default: "."
   version:
     required: false
-    default: "2.5.1"
+    default: "2.6.0"
   sha256:
     # Сумма ассета пином ЗДЕСЬ, а не файлом сумм апстрима: osv-scanner
     # такого файла не публикует вовсе (#13 — проверено пробами по девяти
@@ -27,7 +27,7 @@ inputs:
     # честно откажется ставить бинарь.
     description: "sha256 ассета osv-scanner_linux_amd64 для пина version"
     required: false
-    default: "f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be"
+    default: "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108"
 runs:
   using: composite
   steps:
