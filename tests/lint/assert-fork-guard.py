@@ -31,10 +31,21 @@ job без `if:` печатаются `::notice::` как совет, не ка�
 `runs-on` (`${{ inputs.runs-on }}`) — метку выбирает вызывающий, литерала
 нет. Hosted-метки — вне правила: код форка на hosted-раннере GitHub — норма.
 
+`uses:`-джоба (вызов reusable workflow) с литеральной меткой фермы в
+`with.runs-on` судится как self-hosted: своего `runs-on` у неё нет, но
+раннера она выбирает ровно так же, а вызываемый workflow видит только
+`${{ inputs.runs-on }}` — выражение, которое линт в том репозитории
+пропускает по построению. Guard у такой джобы обязателен и в манифесте
+только с `workflow_call`: передать его вызывающему некому — выше стоят
+адаптеры потребителей в других репозиториях, которых этот линт не видит.
+Так `light` в pipeline.yml прожил без второго эшелона с 2026-08-09: метка
+`polygon` прибита литералом, а `if:` стоял только у соседней `stages`.
+
 Детектор обязан УМЕТЬ КРАСНЕТЬ, и это доказывается здесь же: перед проходом
 по репозиторию он гоняет себя на встроенных манифестах — плохом (guard'а
 нет), хорошем (guard есть), вне области (только push), workflow_call
-(совет, не отказ) — и падает, если различить их не смог.
+(совет, не отказ), `uses:`-вызове с литеральной меткой фермы (нарушение, в
+том числе под workflow_call) — и падает, если различить их не смог.
 
 Коды возврата — конвенция портфеля: 0 чисто, 1 нарушение, 2 не смогли
 проверить (нет каталога workflows / манифест не разбирается).
@@ -74,9 +85,17 @@ def triggers(doc: dict) -> list[str]:
     return []
 
 
+def delegates(job: dict) -> bool:
+    """`uses:`-джоба, передающая метку раннера вызываемому через `with`."""
+    return isinstance(job.get("uses"), str) and isinstance(job.get("with"), dict)
+
+
 def self_hosted_labels(job: dict) -> list[str]:
     """Литералы `runs-on`, разрешающиеся в self-hosted. Выражения — пусто."""
     ro = job.get("runs-on")
+    if ro is None and delegates(job):
+        # Своего runs-on у uses:-джобы нет — метку вызываемому передаёт with.
+        ro = job["with"].get("runs-on")
     if ro is None:
         return []
     if isinstance(ro, dict):  # runs-on: {group: …, labels: …}
@@ -102,9 +121,15 @@ def check_workflow(rel: str, text: str) -> tuple[list[str], list[str]]:
     for name, job in (doc.get("jobs") or {}).items():
         if not isinstance(job, dict) or not self_hosted_labels(job) or has_guard(job):
             continue
-        if pr:
+        # Литерал фермы в with.runs-on: guard обязателен и под workflow_call —
+        # вызываемый видит только выражение, а вызывающие выше живут в других
+        # репозиториях (см. шапку).
+        pinned_for_callee = delegates(job)
+        if pr or (call_only and pinned_for_callee):
+            what = ("reusable-вызов с литеральной меткой фермы в with.runs-on"
+                    if pinned_for_callee else "self-hosted job на pull_request")
             problems.append(
-                f"{rel}::{name}: self-hosted job на pull_request без fork-guard — "
+                f"{rel}::{name}: {what} без fork-guard — "
                 f"добавить `if: github.event.pull_request.head.repo.fork == false` (ADR 0005)")
         elif call_only:
             advice.append(
@@ -136,6 +161,22 @@ _HOSTED = _BAD.replace("[self-hosted, polygon]", "ubuntu-latest")
 _EXPR = _BAD.replace("[self-hosted, polygon]", "${{ inputs.runs-on }}")
 _CALL_ONLY = _BAD.replace("on: [push, pull_request]", "on: [workflow_call]")
 _YAML11 = _BAD.replace("on: [push, pull_request]", "on:\n  pull_request:\n  push:")
+# uses:-джоба: метка фермы уходит вызываемому литералом в with.runs-on —
+# ровно форма `light` в pipeline.yml.
+_USES_BAD = """
+on: [push, pull_request]
+jobs:
+  a:
+    uses: o/r/.github/workflows/x.yml@v1
+    with:
+      runs-on: polygon
+"""
+_USES_GOOD = _USES_BAD.replace("      runs-on: polygon\n",
+                               "      runs-on: polygon\n"
+                               "    if: github.event.pull_request.head.repo.fork == false\n")
+_USES_EXPR = _USES_BAD.replace("runs-on: polygon", "runs-on: ${{ inputs.runs-on }}")
+_USES_HOSTED = _USES_BAD.replace("runs-on: polygon", "runs-on: ubuntu-latest")
+_USES_CALL_ONLY = _USES_BAD.replace("on: [push, pull_request]", "on: [workflow_call]")
 
 
 def selftest() -> list[str]:
@@ -156,6 +197,17 @@ def selftest() -> list[str]:
         out.append("самопроверка: workflow_call обязан давать совет, а не нарушение")
     if not check_workflow("yaml11", _YAML11)[0]:
         out.append("самопроверка: `on:` как ключ True (YAML 1.1) не прочитан")
+    if not check_workflow("uses-bad", _USES_BAD)[0]:
+        out.append("самопроверка: reusable-вызов с литеральной меткой фермы без guard'а не пойман")
+    if check_workflow("uses-good", _USES_GOOD)[0]:
+        out.append("самопроверка: reusable-вызов с guard'ом признан нарушением")
+    for label, text in (("выражение в with.runs-on", _USES_EXPR),
+                        ("hosted в with.runs-on", _USES_HOSTED)):
+        if check_workflow("uses-scope", text)[0]:
+            out.append(f"самопроверка: reusable-вызов вне области ({label}) признан нарушением")
+    if not check_workflow("uses-call", _USES_CALL_ONLY)[0]:
+        out.append("самопроверка: reusable-вызов с литеральной меткой фермы под workflow_call "
+                   "обязан быть нарушением, не советом")
     return out
 
 
