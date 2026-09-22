@@ -15,7 +15,9 @@
         Только .py/.sh под actions/ и tests/ — это разделяемая логика.
         Манифесты (.yml) сознательно разные: репо реализуют разные наборы
         стадий, и требовать от них совпадения значило бы получать шум
-        вместо находок.
+        вместо находок. Контроль из правила 2 сравнивается так же, где бы
+        он ни лежал (.github/scripts/): «обязан быть в обоих» без «обязан
+        совпадать» ловил бы только пропажу файла, не его дрейф.
 
     Правило 2. Контроль обязан присутствовать в ОБОИХ.
         Список явный: отсутствие файла правилом 1 не ловится в принципе,
@@ -82,6 +84,12 @@ REQUIRED_IN_BOTH = (
     # каждого, а класс уже приезжал правкой, которая чинила соседнюю таблицу
     # в том же файле, и был записан как пойманный, будучи непойманным.
     "tests/lint/assert-md-tables.py",
+    # Шаг «Ветка bump/tools + PR» ночного бампа (#44). Скрипт живёт вне
+    # actions/ и tests/, поэтому правило 1 само его не видит — он и его гард
+    # названы здесь явно: приватный ходил через скрипт с 1.5.0, публичный
+    # звал gh напрямую, и паритет этого не стерёг никто.
+    ".github/scripts/pr-upsert.sh",
+    "tests/negative/assert-pr-upsert.sh",
 )
 
 
@@ -97,11 +105,14 @@ def shared_files(root: Path) -> set[str]:
     return found
 
 
-def compare(here: Path, twin: Path) -> list[str]:
+def compare(here: Path, twin: Path, required: tuple[str, ...] = REQUIRED_IN_BOTH) -> list[str]:
     problems = []
 
     mine, theirs = shared_files(here), shared_files(twin)
-    for rel in sorted(mine & theirs):
+    # Обязательный контроль сравнивается байт-в-байт и там, где он лежит
+    # вне actions/ и tests/: правило 2 ловит только пропажу файла.
+    present = {rel for rel in required if (here / rel).is_file() and (twin / rel).is_file()}
+    for rel in sorted((mine & theirs) | present):
         a = (here / rel).read_bytes()
         b = (twin / rel).read_bytes()
         if a != b:
@@ -110,7 +121,7 @@ def compare(here: Path, twin: Path) -> list[str]:
                 f"({len(a)} и {len(b)} байт)"
             )
 
-    for rel in REQUIRED_IN_BOTH:
+    for rel in required:
         missing = [
             name for name, root in (("здесь", here), ("у близнеца", twin))
             if not (root / rel).is_file()
@@ -124,10 +135,15 @@ def compare(here: Path, twin: Path) -> list[str]:
 
 
 def self_test() -> None:
+    # Синтетический контроль вне actions/ и tests/: правило 1 обязано
+    # доходить и до него. Путь не берётся из REQUIRED_IN_BOTH намеренно —
+    # самопроверка не должна зависеть от того, что сейчас в списке.
+    outside = ".github/scripts/synthetic-control.sh"
+    required = REQUIRED_IN_BOTH + (outside,)
     with tempfile.TemporaryDirectory() as tmp:
         a, b = Path(tmp) / "a", Path(tmp) / "b"
         for root in (a, b):
-            for rel in REQUIRED_IN_BOTH:
+            for rel in required:
                 # Каталоги выводятся из списка, а не перечисляются рядом с ним:
                 # пока они были отдельным списком, добавление записи в
                 # REQUIRED_IN_BOTH роняло САМОПРОВЕРКУ по FileNotFoundError —
@@ -135,24 +151,31 @@ def self_test() -> None:
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 (root / rel).write_text("общий текст\n", encoding="utf-8")
 
-        if compare(a, b):
+        if compare(a, b, required):
             raise SystemExit(
                 f"САМОПРОВЕРКА ПРОВАЛЕНА: детектор ругается на одинаковые деревья: "
-                f"{compare(a, b)}"
+                f"{compare(a, b, required)}"
             )
 
         # (1) разошедшийся общий скрипт
         (b / "actions/fetch-verified/fetch_verified.sh").write_text(
             "другой текст\n", encoding="utf-8")
-        if not any("разошёлся" in p for p in compare(a, b)):
+        if not any("разошёлся" in p for p in compare(a, b, required)):
             raise SystemExit("САМОПРОВЕРКА ПРОВАЛЕНА: расхождение файла не поймано")
         (b / "actions/fetch-verified/fetch_verified.sh").write_text(
             "общий текст\n", encoding="utf-8")
 
         # (2) контроль есть только с одной стороны — то, что и пряталось
         (b / "actions/fetch-verified/fetch_verified.sh").unlink()
-        if not any("обязан быть в обоих" in p for p in compare(a, b)):
+        if not any("обязан быть в обоих" in p for p in compare(a, b, required)):
             raise SystemExit("САМОПРОВЕРКА ПРОВАЛЕНА: отсутствующий контроль не пойман")
+
+        # (3) обязательный контроль ВНЕ actions/ и tests/ разошёлся — правило 1
+        # обязано дотянуться и туда, иначе .github/scripts/ дрейфует молча
+        (b / outside).write_text("другой текст\n", encoding="utf-8")
+        if not any(f"{outside}: общий скрипт разошёлся" in p for p in compare(a, b, required)):
+            raise SystemExit(
+                "САМОПРОВЕРКА ПРОВАЛЕНА: расхождение обязательного контроля вне actions/tests не поймано")
 
 
 def main() -> int:

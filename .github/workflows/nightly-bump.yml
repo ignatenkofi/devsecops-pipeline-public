@@ -236,7 +236,10 @@ jobs:
           # Ветка стабильная: повторные ночи обновляют тот же PR, а не плодят новые.
           git push -f origin bump/tools
 
-          BODY=$(cat <<EOF
+          # Тело — в файл вне рабочего дерева: gh ниже считает нетронутый
+          # чекаут признаком здоровья и предупреждает о каждом лишнем файле.
+          BODY_FILE="${RUNNER_TEMP}/pr-body.md"
+          cat > "$BODY_FILE" <<EOF
           Ночное самообновление пинов (#8 приватного репо).
 
           | Инструмент | Было | Стало |
@@ -264,16 +267,18 @@ jobs:
           при желании дёрнуть вручную. Тег v1 двигается только после зелёного
           selftest (ADR 0006).
           EOF
-          )
 
-          EXISTING=$(gh pr list --head bump/tools --state open --json number --jq 'length')
-          if [ "$EXISTING" = "0" ]; then
-            gh pr create --title "chore: bump пинов инструментов (nightly)" \
-              --body "$BODY" --base main --head bump/tools
-          else
-            gh pr edit bump/tools --title "chore: bump пинов инструментов (nightly)" --body "$BODY"
-            echo "::notice::PR уже открыт — обновлён"
-          fi
+          # Создать или обновить PR — скриптом, который различает, ПОЧЕМУ не
+          # вышло (devsecops-pipeline#44): политика репозитория (чекбокс
+          # «Allow GitHub Actions to create and approve pull requests» снят)
+          # — отказ сразу с подсказкой, повтор бессмыслен; транзиент GitHub
+          # (5xx/таймаут) — ограниченный повтор; «PR уже есть» — обновление.
+          # У близнеца восемь ночей подряд обе болезни выглядели одинаковым
+          # красным. Скрипт и его гард — общие с близнецом (assert-twins.py).
+          bash .github/scripts/pr-upsert.sh \
+            --head bump/tools --base main \
+            --title "chore: bump пинов инструментов (nightly)" \
+            --body-file "$BODY_FILE"
 
       # ── Признак живости ────────────────────────────────────────────────
 
