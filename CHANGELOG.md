@@ -6,6 +6,19 @@ selftest). Формат — [Keep a Changelog], версии — semver.
 ## [Unreleased]
 
 ### Changed
+- **semgrep 1.177.0 → 1.178.0** (`actions/semgrep/action.yml`) — ручной бамп
+  пина с `autobump: false` (#49), вторая половина пары с ролью `base` фермы
+  `polygon-iac` (`semgrep==1.178.0`, polygon-iac#208 — влит первым). Как и
+  у 1.177.0 ниже, переезд `v1` — только после пересборки шаблона фермы:
+  до неё образ несёт 1.176.1, и `sast-semgrep` у потребителей фермы
+  красный с любым из трёх пинов. Кандидат прогнан на контрактах стадии
+  (semgrep 1.178.0 с PyPI, offline-пак `rules/`): `--error` даёт rc=1 на
+  эталонном `eval()`, четыре M1-правила ловят свои находки и молчат на
+  безопасных аналогах, `paths.scanned` в `--json-output` на месте и на
+  применимом (1 файл), и на неприменимом (0 файлов, Swift) репозитории,
+  SARIF 2.1.0. В апстриме 1.178.0 — tree-sitter C runtime 0.26.3 и
+  починка зависания `semgrep-core` на Windows; CLI, коды возврата и форма
+  отчёта не менялись.
 - **semgrep 1.176.1 → 1.177.0** (`actions/semgrep/action.yml`) — ручной бамп
   пина, выведенного из ночного автобампа (`autobump: false`, приватный
   `devsecops-pipeline#62`). Пин зеркалится в роли `base` фермы `polygon-iac`
