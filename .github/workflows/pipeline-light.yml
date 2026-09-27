@@ -101,6 +101,12 @@ jobs:
         uses: ignatenkofi/devsecops-pipeline-public/actions/sarif-report@v1
         with:
           sarif-dir: sarif
+          # Половина в имени артефакта — `sarif-light-<run_id>`: приватный
+          # фасад зовёт этот воркфлоу и свой `stages` в одном прогоне, и без
+          # суффикса оба выгружали одноимённый `sarif-<run_id>`
+          # (devsecops-pipeline#78). Литерал, а не `github.job`, — как у
+          # `advisory-verdict-<job>-<run_id>` в ADR 0008 близнеца.
+          job: light
 
       # Финальный вердикт: blocking-стадия (mode B) с находкой → job красный;
       # advisory (A) находка → warning, merge не блокируется.

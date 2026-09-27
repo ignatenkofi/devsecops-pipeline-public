@@ -7,6 +7,19 @@ inputs:
   sarif-dir:
     required: false
     default: sarif
+  job:
+    # Половина конвейера, чей отчёт уезжает, — суффикс имени артефакта
+    # `sarif-<job>-<run_id>` (приватный devsecops-pipeline#78; тот же
+    # принцип, что у `advisory-verdict-<job>-<run_id>` в ADR 0008 близнеца).
+    # Один прогон приватного фасада зовёт приёмник дважды — `light` здесь
+    # и `stages` у близнеца, — и до суффикса обе половины выгружали
+    # одноимённый `sarif-<run_id>`: upload-artifact@v4 дубль не отверг, а
+    # загрузка по имени брала случайную половину. Вызывающий воркфлоу
+    # передаёт литерал; без него берётся id текущей джобы — двух
+    # одинаковых в одном прогоне не бывает.
+    description: "суффикс имени артефакта: light | stages | mobile | release (без него — id джобы)"
+    required: false
+    default: ${{ github.job }}
 runs:
   using: composite
   steps:
@@ -29,7 +42,7 @@ runs:
     - uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: sarif-${{ github.run_id }}
+        name: sarif-${{ inputs.job }}-${{ github.run_id }}
         path: ${{ inputs.sarif-dir }}
         if-no-files-found: ignore
         retention-days: 30
