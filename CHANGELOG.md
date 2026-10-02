@@ -5,6 +5,19 @@ selftest). Формат — [Keep a Changelog], версии — semver.
 
 ## [Unreleased]
 
+### Added
+- **`tests/lint/assert-semgrep-pin.py`** — сверка пина `actions/semgrep`
+  (`inputs.version.default`) с semgrep, запечённым в раннер (`semgrep
+  --version` в PATH): rc 0 равны, 1 расходятся или пин не разобрался, 2
+  запечённую версию взять неоткуда (не «чисто»). Несколько `action.yml` —
+  несколько пинов (`v1` и `main`) против одной запечённой версии;
+  `--github-output` отдаёт `state`/`verdict` для health-issue. До этого
+  сверка была ручной (две команды `gh api` в ранбуке релиза) и сравнивала
+  пин с ролью фермы, а не с запечённым шаблоном: дрейф 1.177.0 против
+  1.176.1 прожил 14.09–24.09 без сигнала. В `selftest` — фикстуры скрипта
+  (lint) и сверка после стадии (stages); боевой прогон — ночная джоба
+  приватного репо на ферме, расхождение заводит health-issue.
+
 ### Changed
 - **semgrep 1.178.0 → 1.179.0** (`actions/semgrep/action.yml`) — ручной бамп
   пина с `autobump: false` (#55), вторая половина пары с ролью `base` фермы

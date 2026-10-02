@@ -147,6 +147,13 @@ jobs:
       - name: "Байткода Python в индексе нет (#18)"
         run: python3 tests/lint/assert-no-bytecode.py .
 
+      # Сверка пина semgrep с запечённым раннера (devsecops-pipeline#62).
+      # Здесь — только фикстуры скрипта: на hosted запечённого semgrep нет,
+      # сверять нечем. Боевой прогон — ночная джоба приватного репо на
+      # ферме (`nightly-bump.yml`, шаг «Пин semgrep против запечённого»).
+      - name: "Фикстуры сверки пина semgrep с запечённым (rc 0/1/2)"
+        run: python3 tests/lint/assert-semgrep-pin.py --selftest
+
       - name: "Шапка и разделитель GFM-таблицы совпадают (#18)"
         run: python3 tests/lint/assert-md-tables.py .
 
@@ -188,6 +195,13 @@ jobs:
         uses: ./actions/semgrep
         with:
           sarif-path: sarif/semgrep.sarif
+
+      # После стадии в PATH стоит ровно то, что установила стадия: сверка
+      # обязана ответить «равно» — это доказательство, что скрипт читает
+      # тот же пин, которым пользуется action, а не свою копию (две
+      # деривации одного пина — две правды, шапка nightly-bump).
+      - name: "Пин semgrep равен установленному стадией (тот же action.yml)"
+        run: python3 tests/lint/assert-semgrep-pin.py --probe actions/semgrep/action.yml
 
       - name: "Позитив: osv-scanner (лок-файлов нет — skip)"
         uses: ./actions/osv-scanner
