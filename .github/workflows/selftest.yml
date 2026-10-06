@@ -10,6 +10,10 @@ on:
   push:
     branches: [main]
 
+# GITHUB_TOKEN: read-only on purpose - no step here writes to GitHub.
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
