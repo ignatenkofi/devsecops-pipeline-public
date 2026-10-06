@@ -29,6 +29,31 @@
 и это неотличимо от чистого прогона.
 
 --------------------------------------------------------------------------
+СТОРОЖ НА МЁРТВОМ РАННЕРЕ (warning, не ошибка)
+
+Правило выше проверяет, что сигнал ЕСТЬ. Оно молчит о том, где он стоит, —
+а это второй способ получить тот же отказ. Шаг `health-issue` исполняется
+на раннере своей джобы; если джоба объявлена `runs-on: [self-hosted, …]`,
+а раннеров с такой меткой нет (ферма стоит, разобрана, выпала из установки
+App), прогон не падает и не доходит до `always()` — он висит в очереди и
+через сутки закрывается `cancelled`. Health-issue не заводится никогда,
+снаружи это «отказов не было». Так с 2026-10-06 стоят `nightly-bump` и
+`tag-lag` приватного репо: оба формально «ok» по правилу выше, оба немы.
+
+Отсюда второе правило — предупреждением: у периодического workflow, чьи
+`health-issue` под `always()` все до одного стоят на self-hosted джобах,
+нет hosted-дублёра, и его признак живости умирает вместе с раннером.
+Лечится джобой-сторожем на `ubuntu-latest` (отдельная джоба в том же
+workflow, `if: always()`, читает исход основной), либо осознанным
+решением владельца не платить за hosted-минуты — тогда предупреждение и
+есть его напоминание. Warning, а не ошибка: решение 2026-08-09 держит
+приватные джобы на ферме намеренно (`assert-runner-labels.py`), и гард,
+красящий это решение в отказ, был бы шире своего правила. `--strict`
+поднимает предупреждение до ошибки (rc 1) там, где hosted-дублёр
+обязателен. `runs-on` выражением (`${{ … }}`) или без hosted/self-hosted
+литерала — «неизвестно», предупреждения нет: метку выбирает вызывающий.
+
+--------------------------------------------------------------------------
 СКВОЗНОЙ ИНВЕНТАРЬ (`--inventory`)
 
 Заглавие #19 — «у КАЖДОЙ периодической джобы», а блокирующее правило выше
@@ -101,7 +126,7 @@ plist (`Disabled = true`) — то же третье состояние, что 
         отличаться от «нашёл расхождение» кодом, иначе чинить пойдут не
         тот конец.
 
-Использование:  assert-schedule-liveness.py [корень репозитория]
+Использование:  assert-schedule-liveness.py [корень репозитория] [--strict]
                 assert-schedule-liveness.py --inventory [каталог] [--json]
 """
 from __future__ import annotations
@@ -159,6 +184,64 @@ def check_workflow(rel: str, text: str) -> list:
     return [
         f"{rel}: периодическая джоба без признака живости — провалившийся "
         f"scheduled-workflow сам о себе не сообщит (#19)"
+    ]
+
+
+SELF_HOSTED, HOSTED, UNKNOWN_RUNNER = "self-hosted", "hosted", "unknown"
+_HOSTED_PREFIXES = ("ubuntu-", "windows-", "macos-")
+
+
+def runner_kind(job: dict) -> str:
+    """Где исполняется джоба: self-hosted / hosted / неизвестно.
+
+    Литерал `self-hosted` среди меток — ферма; метка с префиксом образа
+    GitHub (`ubuntu-`, `windows-`, `macos-`) — hosted; выражение `${{ … }}`,
+    runner group без меток или пустой `runs-on` — неизвестно. Неизвестное
+    предупреждения не даёт: метку выбирает вызывающий, и красить это
+    значит шуметь на исправном фасаде (та же граница, что у
+    assert-runner-labels.py).
+    """
+    raw = (job or {}).get("runs-on")
+    if isinstance(raw, dict):
+        raw = raw.get("labels")
+    labels = raw if isinstance(raw, list) else [raw]
+    labels = [str(x) for x in labels if x is not None]
+    if not labels or any("${{" in x for x in labels):
+        return UNKNOWN_RUNNER
+    if any(x.strip() == "self-hosted" for x in labels):
+        return SELF_HOSTED
+    if any(x.strip().startswith(_HOSTED_PREFIXES) for x in labels):
+        return HOSTED
+    return UNKNOWN_RUNNER
+
+
+def watchdog_warnings(rel: str, text: str) -> list:
+    """Сторож на мёртвом раннере: все `health-issue` под `always()` — на
+    self-hosted джобах, hosted-дублёра нет. Предупреждение, не ошибка:
+    см. шапку. Пусто, если сигнала нет вовсе (это ошибка check_workflow),
+    если хоть один сигнал стоит на hosted или если раннер неизвестен."""
+    try:
+        doc = yaml.safe_load(text) or {}
+    except yaml.YAMLError:
+        return []
+    if not isinstance(doc, dict) or "schedule" not in triggers(doc):
+        return []
+
+    kinds = []
+    for name, job in ((doc.get("jobs") or {}) or {}).items():
+        for step in (job or {}).get("steps") or []:
+            if HEALTH_ACTION not in str((step or {}).get("uses", "")):
+                continue
+            if str((step or {}).get("if", "")).strip() == "always()":
+                kinds.append((str(name), runner_kind(job)))
+    if not kinds or any(k != SELF_HOSTED for _, k in kinds):
+        return []
+    jobs = ", ".join(sorted({n for n, _ in kinds}))
+    return [
+        f"{rel}: признак живости стоит только на self-hosted ({jobs}), "
+        f"hosted-дублёра нет — сторож на мёртвом раннере: без раннера прогон "
+        f"висит в очереди, до `always()` не доходит, health-issue не "
+        f"заводится, и отказ снаружи выглядит как «отказов не было» (#19)"
     ]
 
 
@@ -327,6 +410,13 @@ def scan_actions(root: Path, repo: str) -> list[Task]:
         # Вторая деривация одного правила заводит вторую правду, которая
         # расходится с первой молча.
         bad = check_workflow(rel, text)
+        signal = "health-issue под always()"
+        if not bad and watchdog_warnings(rel, text):
+            # Статус остаётся ok — правило про наличие сигнала выполнено.
+            # Но читатель инвентаря обязан видеть, что сигнал умирает
+            # вместе с раннером: «ok» без этой оговорки и есть тот
+            # ложный зелёный, который ищет #19.
+            signal += "; только на self-hosted, hosted-дублёра нет"
         tasks.append(
             Task(
                 "actions",
@@ -336,7 +426,7 @@ def scan_actions(root: Path, repo: str) -> list[Task]:
                 ", ".join(crons) or "?",
                 "",
                 GAP if bad else OK,
-                "" if bad else "health-issue под always()",
+                "" if bad else signal,
             )
         )
     return tasks
@@ -554,6 +644,41 @@ _MUTANTS = (
 # расписание, а гард шире своего правила шумит на исправном репозитории.
 _OUT_OF_SCOPE = _GOOD.replace("  schedule:\n    - cron: \"0 3 * * *\"", "  push:\n    branches: [main]")
 
+
+def _with_runner(text: str, runs_on: str) -> str:
+    return text.replace("  bump:\n", f"  bump:\n    runs-on: {runs_on}\n")
+
+
+# Сторож на мёртвом раннере: сигнал есть и под always() — правило выше
+# довольно, — но стоит он на self-hosted джобе, и дублёра на hosted нет.
+_SELF_HOSTED_ONLY = _with_runner(_GOOD, "[self-hosted, polygon]")
+_SELF_HOSTED_DICT = _with_runner(_GOOD, "{labels: [self-hosted, polygon]}")
+# Контроли, на которых предупреждения быть не должно.
+_HOSTED_ONLY = _with_runner(_GOOD, "ubuntu-latest")
+_RUNNER_EXPR = _with_runner(_GOOD, "${{ inputs.runs-on }}")
+_SELF_HOSTED_NO_SCHEDULE = _with_runner(_OUT_OF_SCOPE, "[self-hosted, polygon]")
+_SELF_HOSTED_WITH_HOSTED_WATCHDOG = _SELF_HOSTED_ONLY + """\
+  watchdog:
+    runs-on: ubuntu-latest
+    needs: bump
+    if: always()
+    steps:
+      - if: always()
+        uses: ./actions/health-issue
+"""
+_WATCHDOG_MUTANTS = (
+    ("сигнал только на self-hosted (список меток)", _SELF_HOSTED_ONLY),
+    ("сигнал только на self-hosted (labels: в словаре)", _SELF_HOSTED_DICT),
+)
+_WATCHDOG_CONTROLS = (
+    ("раннер не указан", _GOOD),
+    ("сигнал на hosted", _HOSTED_ONLY),
+    ("runs-on выражением", _RUNNER_EXPR),
+    ("self-hosted без расписания", _SELF_HOSTED_NO_SCHEDULE),
+    ("self-hosted плюс hosted-дублёр", _SELF_HOSTED_WITH_HOSTED_WATCHDOG),
+    ("сигнала нет вовсе — это ошибка, не предупреждение", _MUTANTS[0][1]),
+)
+
 _TIMER_PERIODIC = "[Timer]\nOnBootSec=90\nOnUnitInactiveSec=15min\n"
 _TIMER_ONESHOT = "[Timer]\nOnBootSec=90\n"
 _DISARMED_WF = """
@@ -612,6 +737,21 @@ def selftest() -> list:
     for label, text in _MUTANTS:
         if not check_workflow("фикстура", text):
             problems.append(f"самопроверка: мутант «{label}» не пойман — детектор слеп")
+
+    # Сторож на мёртвом раннере: предупреждение обязано сработать на
+    # self-hosted-сигнале без дублёра и промолчать на каждом контроле.
+    # Блокирующее правило при этом мутанта не трогает: сигнал у него есть.
+    for label, text in _WATCHDOG_MUTANTS:
+        if not watchdog_warnings("фикстура", text):
+            problems.append(f"самопроверка: мутант «{label}» не предупреждён — "
+                            "детектор дублёра слеп")
+        if check_workflow("фикстура", text):
+            problems.append(f"самопроверка: мутант «{label}» принят за нарушение "
+                            "блокирующего правила — warning стал ошибкой")
+    for label, text in _WATCHDOG_CONTROLS:
+        if watchdog_warnings("фикстура", text):
+            problems.append(f"самопроверка: предупреждение на контроле «{label}» — "
+                            "детектор дублёра шире своего правила")
 
     # Таксономия механизмов обязана совпадать с набором сканеров. Без этого
     # контроля можно добавить сканер и не объявить механизм (итог соврёт об
@@ -689,6 +829,14 @@ def selftest() -> list:
             problems.append("самопроверка: неразбираемый манифест исчез из инвентаря")
         if ".github/workflows/eventful.yml" in acts:
             problems.append("самопроверка: workflow без расписания попал в инвентарь")
+        (wf / "farm.yml").write_text(_SELF_HOSTED_ONLY, encoding="utf-8")
+        farm = [t for t in scan_repo(root) if t.where == ".github/workflows/farm.yml"]
+        if [t.status for t in farm] != [OK] or "hosted-дублёра нет" not in farm[0].signal:
+            problems.append(
+                "самопроверка: инвентарь не называет сигнал на self-hosted без "
+                f"дублёра — {[(t.status, t.signal) for t in farm]}")
+        for name in ("disarmed.yml", "broken.yml", "eventful.yml", "farm.yml"):
+            (wf / name).unlink()
 
         # Третья форма в скрипте: liveness_mark — сигнал; в комментарии — нет.
         (root / "scripts/systemd/t.service").write_text(
@@ -763,8 +911,11 @@ def selftest() -> list:
 
 # --- режимы ----------------------------------------------------------------
 
-def run_repo_mode(root: Path) -> int:
-    """Блокирующее правило. Контракт прежний: Actions, exit 0/1."""
+def run_repo_mode(root: Path, strict: bool = False) -> int:
+    """Блокирующее правило. Контракт прежний: Actions, exit 0/1.
+
+    Предупреждения (сторож на мёртвом раннере) печатаются всегда и rc не
+    меняют; `strict=True` делает их ошибкой."""
     files = sorted((root / ".github" / "workflows").glob("*.y*ml"))
     if not files:
         # Ноль манифестов — «не смогли проверить», а не «чисто»: ровно так
@@ -773,7 +924,7 @@ def run_repo_mode(root: Path) -> int:
               file=sys.stderr)
         return 1
 
-    problems, scheduled = [], 0
+    problems, warnings, scheduled = [], [], 0
     for path in files:
         text = path.read_text(encoding="utf-8")
         rel = str(path.relative_to(root))
@@ -784,6 +935,13 @@ def run_repo_mode(root: Path) -> int:
         if isinstance(doc, dict) and "schedule" in triggers(doc):
             scheduled += 1
         problems += check_workflow(rel, text)
+        warnings += watchdog_warnings(rel, text)
+
+    if strict:
+        problems += warnings
+        warnings = []
+    for w in warnings:
+        print(f"::warning::{w}", file=sys.stderr)
 
     if problems:
         for p in problems:
@@ -792,9 +950,14 @@ def run_repo_mode(root: Path) -> int:
         return 1
 
     # Число печатается намеренно: «0 периодических» — это тоже ответ, и
-    # читатель должен увидеть его, а не только слово OK.
+    # читатель должен увидеть его, а не только слово OK. Предупреждения —
+    # тоже числом: «OK» при двух немых сторожах без этой оговорки читался
+    # бы как «всё под наблюдением».
     print(f"OK: периодических workflow {scheduled} из {len(files)}, "
-          f"у каждого health-issue под always()")
+          f"у каждого health-issue под always()"
+          + (f"; сторожей только на self-hosted без hosted-дублёра "
+             f"{len(warnings)} (warning, не ошибка; --strict делает ошибкой)"
+             if warnings else ""))
 
     # Периодика этого же репозитория, заведённая не через Actions, — справкой,
     # не вердиктом: блокирующее правило про Actions, и расширять его молча
@@ -864,6 +1027,9 @@ def main() -> int:
     ap.add_argument("--inventory", metavar="КАТАЛОГ", nargs="?", const=".",
                     help="сквозной инвентарь: клон или каталог клонов")
     ap.add_argument("--json", action="store_true", help="машинный вывод инвентаря")
+    ap.add_argument("--strict", action="store_true",
+                    help="сторож только на self-hosted без hosted-дублёра — "
+                         "ошибка (rc 1), а не предупреждение")
     args = ap.parse_args()
 
     blind = selftest()
@@ -874,7 +1040,7 @@ def main() -> int:
 
     if args.inventory is not None:
         return run_inventory(Path(args.inventory).resolve(), args.json)
-    return run_repo_mode(Path(args.root).resolve())
+    return run_repo_mode(Path(args.root).resolve(), strict=args.strict)
 
 
 if __name__ == "__main__":
