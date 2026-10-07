@@ -50,6 +50,19 @@ selftest). Формат — [Keep a Changelog], версии — semver.
   убран выход `sca`, стадия добавлена в `--implemented` без выхода, убран
   `moved` у `pin-apply`; не пойманный мутант или промахнувшаяся мутация
   роняют линт как слепой.
+- **`actions/checkout@v7`, `actions/upload-artifact@v7`,
+  `persist-credentials: false`** (#62). Пины `@v4` объявлены на Node 20, и
+  каждый прогон selftest предупреждал «Node.js 20 is deprecated».
+  `checkout@v5+` и `upload-artifact@v6+` идут на Node 24, им нужен раннер
+  не ниже v2.327.1; для self-hosted раннера из `inputs.runs-on` это его
+  условие. Потребителей `v1` правка касается после переноса тега: чекаут в
+  `pipeline-light.yml` и `upload-artifact` в `actions/sarif-report` (имя
+  артефакта `sarif-<job>-<run_id>` прежнее). Заодно чекауты больше не
+  оставляют токен в git-конфиге рабочей копии (zizmor `artipacked`). Креды
+  держит только первый чекаут `nightly-bump`: ему они нужны для
+  `git push -f origin bump/tools`, там комментарий и
+  `# zizmor: ignore[artipacked]`. `tag-lag` берёт теги анонимно —
+  репозиторий публичный.
 
 ## [1.7.0] — 2026-10-02
 

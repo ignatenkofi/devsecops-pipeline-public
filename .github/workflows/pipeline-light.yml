@@ -56,10 +56,14 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Креды в рабочей копии стадиям не нужны: gitleaks читает историю
+      # локально, а сторонние бинари стадий токен потребителя читать не
+      # должны.
       - name: Checkout потребителя
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0 # gitleaks смотрит историю PR-диапазона
+          persist-credentials: false
 
       - name: Профиль класса
         id: profile

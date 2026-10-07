@@ -47,7 +47,12 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Git-креды этого чекаута остаются СОЗНАТЕЛЬНО: шаг «Ветка bump/tools
+      # + PR» ниже делает им `git push -f origin bump/tools`. Цена названа:
+      # токен с `contents: write` виден каждому шагу до push, включая
+      # бинари-кандидаты стадий. Остальные чекауты репо —
+      # `persist-credentials: false`.
+      - uses: actions/checkout@v7 # zizmor: ignore[artipacked] -- push bump/tools ниже
 
       - name: Текущие пины и свежие версии апстрима
         id: versions
