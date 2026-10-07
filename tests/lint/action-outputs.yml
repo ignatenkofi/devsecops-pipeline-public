@@ -1,0 +1,61 @@
+# Пары «манифест → скрипт → как спросить у кода его ключи» и мутанты
+# настоящих манифестов для tests/lint/assert-action-outputs.py (#61).
+#
+# Код линта общий с близнецом и совпадает байт-в-байт (assert-twins.py);
+# этот файл — свой у каждого репо, потому что actions у близнецов разные.
+# Список ведётся руками: «манифест обязан сходиться со своим скриптом» —
+# решение, а не свойство файловой системы. Но охват проверяется: манифест
+# под actions/ с непустым `outputs:`, которого здесь нет, — ошибка линта.
+#
+# pairs:
+#   manifest — composite-манифест с `outputs:`;
+#   script   — код, который печатает ключи (пара не найдена — отказ, не «чисто»);
+#   keys     — как получить ключи: pins-discover | pins-apply (подкоманда
+#              pins.py на фикстуре), step (исполнить шаг `step` самого
+#              манифеста с env), unverified (офлайн не вывести — нужен
+#              reason; линт печатает «не проверено», сверяет только ссылки);
+#   step     — id шага, который печатает ключи: на него обязан ссылаться
+#              каждый `value:` манифеста.
+# mutants — правки копии дерева, каждую линт обязан поймать; хотя бы один
+# на пару. pattern — regex Python (в одинарных кавычках YAML обратный слэш
+# буквальный), обязан совпасть ровно один раз; repl — замена, "" — удаление.
+pairs:
+  - manifest: actions/pin-discover/action.yml
+    script: actions/pin-tools/pins.py
+    keys: pins-discover
+    step: run
+  - manifest: actions/pin-apply/action.yml
+    script: actions/pin-tools/pins.py
+    keys: pins-apply
+    step: run
+  # REPO_CLASS — любой существующий класс: множество ключей от класса не
+  # зависит (resolve.py печатает строку на каждую стадию из `--implemented`
+  # и оба списка unimplemented при любом профиле).
+  - manifest: actions/profile-resolve/action.yml
+    script: actions/profile-resolve/resolve.py
+    keys: step
+    step: resolve
+    env: {REPO_CLASS: library, SKIP: "", EXTRA: ""}
+
+mutants:
+  # Ровно дефект #19: pins.py печатает has-manual, манифест его не объявляет.
+  - manifest: actions/pin-discover/action.yml
+    label: выход has-manual убран
+    pattern: '(?m)^  has-manual:\n(?:    .*\n)+'
+    repl: ''
+  - manifest: actions/pin-apply/action.yml
+    label: выход moved убран
+    pattern: '(?m)^  moved:\n(?:    .*\n)+'
+    repl: ''
+  - manifest: actions/profile-resolve/action.yml
+    label: выход стадии sca убран
+    pattern: '(?m)^  sca:\n(?:    .*\n)+'
+    repl: ''
+  - manifest: actions/profile-resolve/action.yml
+    label: стадия в --implemented без выхода
+    pattern: '(--implemented "[^"]+)"'
+    repl: '\1,selftest-phantom"'
+  - manifest: actions/profile-resolve/action.yml
+    label: выход sca берёт значение из чужого шага
+    pattern: 'steps\.resolve\.outputs\.sca\b'
+    repl: 'steps.run.outputs.sca'

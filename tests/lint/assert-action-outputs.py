@@ -18,7 +18,7 @@
 
 Детектор смотрит на стык двух артефактов, каждый из которых по отдельности
 корректен, — поэтому ни линт YAML, ни тесты скрипта его не видят. Проверяются
-две стороны:
+три стороны:
 
   A. Множества совпадают. Напечатанный, но не объявленный ключ — тихая пустая
      строка у потребителя (собственно #19). Объявленный, но никогда не
@@ -27,24 +27,40 @@
   B. Объявленный выход ссылается на СВОЁ имя в `steps.<id>.outputs.<имя>`.
      Опечатка здесь даёт ровно тот же пустой результат, но выглядит как
      полностью объявленный выход.
+  C. И на СВОЙ шаг: `<id>` — тот шаг `runs.steps` этого манифеста, который
+     печатает ключи. `steps.run.outputs.sca` при шаге `id: resolve` — та же
+     пустая строка, а A и B её не видят: имя совпадает, множество тоже.
 
-Сторожатся все манифесты, которые объявляют выходы: pin-discover, pin-apply,
-profile-resolve. Первая редакция сторожила один pin-discover — и удалённый
-выход `sca` у profile-resolve не замечал ни этот линт, ни
-assert-composite-hygiene, ни actionlint, ни assert-profile-resolve. Цена
-там выше, чем у #19: `pipeline-light.yml` читает `steps.profile.outputs.sca`,
+Сторожатся ВСЕ манифесты под `actions/` с непустым `outputs:`, и это тоже
+проверяется, а не обещается: манифест с выходами, которого нет в файле пар,
+— нарушение с его именем. Первая редакция сторожила один pin-discover — и
+удалённый выход `sca` у profile-resolve не замечал ни этот линт, ни
+assert-composite-hygiene, ни actionlint, ни assert-profile-resolve. Цена там
+выше, чем у #19: `pipeline-light.yml` читает `steps.profile.outputs.sca`,
 "" != 'off' — стадия работает, а Gate видит режим "", а не "B", и печатает
 только предупреждение. Блокирующая по профилю стадия молча становилась
-advisory у каждого потребителя `v1`.
+advisory у каждого потребителя `v1`. Вторая сторожила список в коде, и
+манифест вне списка проходил так же молча.
+
+Файл общий с близнецом и обязан совпадать байт-в-байт
+(tests/lint/assert-twins.py). Различается только то, ЧТО сторожить: пары
+«манифест → скрипт → как спросить у кода его ключи» и мутанты настоящих
+манифестов живут в `tests/lint/action-outputs.yml`, своём у каждого репо
+(`.yml` правилом 1 близнецов не сверяется — намеренно). Пара, ключи которой
+офлайн не вывести, записывается там как `unverified` с причиной и
+печатается предупреждением «не проверено», а не пропускается молча; ссылки
+B и C у неё сверяются всё равно.
 
 Детектор обязан уметь краснеть, и это проверяется здесь же, а не верой.
-Вместе с проходом он прогоняет себя дважды: на трёх заведомо испорченных
-текстовых манифестах (ключ убран, ключ лишний, ссылка на чужое имя) — это
-проверка сравнения, — и на мутантах НАСТОЯЩИХ манифестов в копии дерева
-(выход стадии убран, стадия добавлена в `--implemented` без выхода, выход
-`moved` у pin-apply убран) — это проверка всей цепочки «манифест → его же
-код → ключи». Не пойман хоть один мутант, или мутация промахнулась мимо
-файла, — линт падает как слепой.
+Вместе с проходом он прогоняет себя: на заведомо испорченных текстовых
+манифестах (ключ убран, ключ лишний, ссылка на чужое имя, ссылка на чужой
+шаг) — это проверка сравнения; на дереве с манифестом вне списка — это
+проверка охвата; на шагах-фикстурах (упал, напечатав ключи; отработал, не
+напечатав; пишет во все файлы команд) — это проверка исполнения; и на
+мутантах НАСТОЯЩИХ манифестов из файла пар в копии дерева — это проверка всей
+цепочки «манифест → его же код → ключи». Не пойман хоть один мутант,
+мутация промахнулась мимо файла или у пары нет ни одного мутанта, — линт
+падает как слепой.
 
 Использование:  assert-action-outputs.py [корень репозитория]
 """
@@ -65,7 +81,19 @@ try:
 except ImportError:  # pragma: no cover - среда без pyyaml
     sys.exit("нужен pyyaml: python3 -m pip install pyyaml")
 
-REF_RE = re.compile(r"steps\.[A-Za-z0-9_-]+\.outputs\.([A-Za-z0-9_-]+)")
+# Пары и мутанты этого репо. Путь от корня проверяемого дерева, а не от
+# этого файла: данные описывают дерево, которое сторожат.
+DATA_REL = "tests/lint/action-outputs.yml"
+
+REF_RE = re.compile(r"steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)")
+
+# Файлы команд, через которые шаг Actions влияет на СЛЕДУЮЩИЕ шаги джобы.
+# Исполняя шаг манифеста, линт подменяет все пять, а не один GITHUB_OUTPUT:
+# унаследованный путь внутри Actions — файл настоящего шага selftest, и
+# правка манифеста, начавшая писать в GITHUB_ENV, тихо меняла бы окружение
+# самой проверки.
+FILE_COMMANDS = ("GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_STATE",
+                 "GITHUB_STEP_SUMMARY")
 
 
 def _keys(text: str) -> set:
@@ -145,148 +173,375 @@ def step_keys(manifest: Path, step_id: str, env: dict) -> set:
         (shim / "python3").write_text(
             f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n', encoding="utf-8")
         (shim / "python3").chmod(0o755)
-        out = Path(tmp) / "github-output"
-        out.write_text("", encoding="utf-8")
+        commands = {name: Path(tmp) / name.lower() for name in FILE_COMMANDS}
+        for path in commands.values():
+            path.write_text("", encoding="utf-8")
         run = subprocess.run(
             # Те же флаги, с которыми Actions исполняет `shell: bash`.
             ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", steps[0]["run"]],
             cwd=tmp, capture_output=True, text=True, check=False,
+            # Подменённое — последним: `env` пары не может вернуть шагу
+            # настоящие файлы команд.
             env={**os.environ, **env,
                  "GITHUB_ACTION_PATH": str(manifest.parent),
-                 "GITHUB_OUTPUT": str(out),
+                 **{name: str(path) for name, path in commands.items()},
                  "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '')}"},
         )
-        keys = _keys(out.read_text(encoding="utf-8"))
+        keys = _keys(commands["GITHUB_OUTPUT"].read_text(encoding="utf-8"))
+    # Оба условия, а не одно: шаг, упавший ПОСЛЕ печати части ключей, отдал
+    # бы неполное множество, и сверка с ним выглядела бы здоровьем.
     if run.returncode != 0 or not keys:
         raise _unknown(f"{manifest}: шаг {step_id} дал rc {run.returncode} и "
                        f"ключей {len(keys)}", run.stdout + run.stderr)
     return keys
 
 
-# Манифест — его скрипт — как спросить у кода, какие ключи он печатает.
-# Список ведётся руками: «этот манифест обязан сходиться со своим скриптом»
-# — решение, а не свойство файловой системы (тот же принцип, что у
-# REQUIRED_IN_BOTH в assert-twins.py). Новый action с `outputs:` — новая
-# строка здесь.
-#
-# REPO_CLASS у profile-resolve — любой существующий класс: множество ключей
-# от класса не зависит (resolve.py печатает строку на каждую стадию из
-# `--implemented` и оба списка unimplemented при любом профиле).
-PAIRS = (
-    ("actions/pin-discover/action.yml", "actions/pin-tools/pins.py", discover_keys),
-    ("actions/pin-apply/action.yml", "actions/pin-tools/pins.py", apply_keys),
-    ("actions/profile-resolve/action.yml", "actions/profile-resolve/resolve.py",
-     lambda manifest, _script: step_keys(
-         manifest, "resolve", {"REPO_CLASS": "library", "SKIP": "", "EXTRA": ""})),
-)
+# Как спросить у кода, какие ключи он печатает. Имя способа — поле `keys`
+# пары в файле данных; `unverified` — ключи офлайн не вывести, сверяются
+# только ссылки B и C, а пара печатается предупреждением «не проверено».
+DERIVATIONS = {
+    "pins-discover": lambda pair, manifest, script: discover_keys(manifest, script),
+    "pins-apply": lambda pair, manifest, script: apply_keys(manifest, script),
+    "step": lambda pair, manifest, script: step_keys(
+        manifest, pair["step"], {k: str(v) for k, v in (pair.get("env") or {}).items()}),
+}
+UNVERIFIED = "unverified"
 
 
-def check(manifest_rel: str, manifest_text: str, printed: set) -> list:
+def validate_data(data) -> list:
+    """Форма файла пар. Ошибка формы — отказ проверять, а не «чисто»."""
+    if not isinstance(data, dict):
+        return [f"{DATA_REL}: ожидался словарь с ключами pairs и mutants"]
     problems = []
-    declared = yaml.safe_load(manifest_text).get("outputs") or {}
+    pairs, mutants = data.get("pairs"), data.get("mutants")
+    if not isinstance(pairs, list) or not pairs:
+        return [f"{DATA_REL}: pairs пуст или не список — сторожить нечего"]
+    if not isinstance(mutants, list):
+        return [f"{DATA_REL}: mutants не список"]
+    manifests = set()
+    for i, pair in enumerate(pairs):
+        if not isinstance(pair, dict):
+            problems.append(f"{DATA_REL}: pairs[{i}] не словарь")
+            continue
+        where = f"{DATA_REL}: pairs[{i}] ({pair.get('manifest')})"
+        for field in ("manifest", "script", "keys", "step"):
+            if not isinstance(pair.get(field), str) or not pair.get(field):
+                problems.append(f"{where}: нет поля {field}")
+        if pair.get("keys") not in (*DERIVATIONS, UNVERIFIED):
+            problems.append(f"{where}: keys={pair.get('keys')!r} — способа нет; "
+                            f"есть {sorted(DERIVATIONS)} и {UNVERIFIED}")
+        if not isinstance(pair.get("env", {}), dict):
+            problems.append(f"{where}: env обязан быть словарём «переменная: значение»")
+        if pair.get("keys") == UNVERIFIED and not str(pair.get("reason") or "").strip():
+            problems.append(f"{where}: unverified без reason — «не проверено» "
+                            f"без причины неотличимо от забытого")
+        if pair.get("manifest") in manifests:
+            problems.append(f"{where}: манифест в списке дважды")
+        manifests.add(pair.get("manifest"))
+    covered = set()
+    for i, mutant in enumerate(mutants):
+        where = f"{DATA_REL}: mutants[{i}]"
+        if not isinstance(mutant, dict):
+            problems.append(f"{where} не словарь")
+            continue
+        for field in ("manifest", "label", "pattern"):
+            if not isinstance(mutant.get(field), str) or not mutant.get(field):
+                problems.append(f"{where}: нет поля {field}")
+        if not isinstance(mutant.get("repl"), str):
+            problems.append(f"{where}: repl обязан быть строкой (пустая — удаление)")
+        if mutant.get("manifest") not in manifests:
+            problems.append(f"{where}: манифест {mutant.get('manifest')} не из pairs")
+        try:
+            re.compile(str(mutant.get("pattern")))
+        except re.error as exc:
+            problems.append(f"{where}: pattern не компилируется ({exc})")
+        covered.add(mutant.get("manifest"))
+    # Пара без мутанта не доказана ничем: её сверка могла бы молчать на
+    # любом дефекте, и самопроверка бы этого не увидела.
+    for manifest in sorted(m for m in manifests - covered if isinstance(m, str)):
+        problems.append(f"{DATA_REL}: у пары {manifest} нет ни одного мутанта — "
+                        f"самопроверка её не доказывает")
+    return problems
 
-    for missing in sorted(printed - set(declared)):
+
+def load_data(root: Path) -> dict:
+    path = root / DATA_REL
+    if not path.is_file():
+        # Пропавший файл пар — «проверять нечем», а не «чисто».
+        raise SystemExit(f"::error::нет {DATA_REL} — пар «манифест → скрипт» этого "
+                         f"репо нет, проверять нечем")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise SystemExit(f"::error::{DATA_REL} не разбирается: {exc}")
+    problems = validate_data(data)
+    if problems:
+        raise SystemExit("\n".join(f"::error::{p}" for p in problems))
+    return data
+
+
+def check(manifest_rel: str, manifest_text: str, printed, producer: str) -> list:
+    """Нарушения манифеста. `printed is None` — ключи не выведены (unverified):
+    множества не сравниваются, ссылки на имя и шаг — сверяются."""
+    problems = []
+    doc = yaml.safe_load(manifest_text) or {}
+    declared = doc.get("outputs") or {}
+    ids = [s["id"] for s in ((doc.get("runs") or {}).get("steps") or [])
+           if isinstance(s, dict) and s.get("id")]
+
+    if producer not in ids:
         problems.append(
-            f"{manifest_rel}: скрипт печатает '{missing}', манифест его не объявляет "
-            f"— у потребителя это пустая строка, а не ошибка (#19)"
+            f"{manifest_rel}: шага id: {producer}, который по {DATA_REL} печатает "
+            f"ключи, в runs.steps нет (есть: {', '.join(ids) or 'ни одного'})"
         )
-    for extra in sorted(set(declared) - printed):
-        problems.append(
-            f"{manifest_rel}: объявлен выход '{extra}', которого скрипт не печатает "
-            f"— манифест обещает значение, которого не будет"
-        )
+    if printed is not None:
+        for missing in sorted(printed - set(declared)):
+            problems.append(
+                f"{manifest_rel}: скрипт печатает '{missing}', манифест его не объявляет "
+                f"— у потребителя это пустая строка, а не ошибка (#19)"
+            )
+        for extra in sorted(set(declared) - printed):
+            problems.append(
+                f"{manifest_rel}: объявлен выход '{extra}', которого скрипт не печатает "
+                f"— манифест обещает значение, которого не будет"
+            )
     for name, body in sorted(declared.items()):
         refs = REF_RE.findall(str((body or {}).get("value", "")))
-        if refs and name not in refs:
+        if refs and name not in [out for _, out in refs]:
             problems.append(
-                f"{manifest_rel}: выход '{name}' берёт значение из {refs} — "
-                f"ссылка на чужое имя раскрывается в пустую строку так же тихо"
+                f"{manifest_rel}: выход '{name}' берёт значение из "
+                f"{[out for _, out in refs]} — ссылка на чужое имя раскрывается в "
+                f"пустую строку так же тихо"
+            )
+        for step_id, _ in refs:
+            if step_id not in ids:
+                problems.append(
+                    f"{manifest_rel}: выход '{name}' ссылается на шаг '{step_id}', "
+                    f"которого в runs.steps нет (есть: {', '.join(ids) or 'ни одного'}) "
+                    f"— у потребителя пустая строка"
+                )
+            elif step_id != producer:
+                problems.append(
+                    f"{manifest_rel}: выход '{name}' берёт значение из шага "
+                    f"'{step_id}', а ключи печатает шаг '{producer}'"
+                )
+    return problems
+
+
+def unlisted(root: Path, listed: set) -> list:
+    """Манифесты с непустым `outputs:`, которых нет в файле пар."""
+    problems = []
+    found = sorted({*root.glob("actions/**/action.yml"), *root.glob("actions/**/action.yaml")})
+    for manifest in found:
+        rel = manifest.relative_to(root).as_posix()
+        doc = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+        if isinstance(doc, dict) and doc.get("outputs") and rel not in listed:
+            problems.append(
+                f"{rel}: объявляет выходы, но в {DATA_REL} его нет — сверять его "
+                f"некому. Новый action с outputs: — новая пара (или unverified с "
+                f"причиной)"
             )
     return problems
 
 
+def audit(root: Path, data: dict) -> tuple:
+    """(нарушения, пары «не проверено»)."""
+    problems, skipped = [], []
+    problems += unlisted(root, {pair["manifest"] for pair in data["pairs"]})
+    for pair in data["pairs"]:
+        manifest, script = root / pair["manifest"], root / pair["script"]
+        if not manifest.is_file() or not script.is_file():
+            # Пропавшая пара — «не смогли проверить», а не «чисто»: молчание
+            # здесь неотличимо от здоровья, и это ровно тот класс, ради
+            # которого детектор написан.
+            raise SystemExit(f"::error::нет пары {pair['manifest']} / {pair['script']} — "
+                             f"проверять нечем")
+        if pair["keys"] == UNVERIFIED:
+            printed = None
+            skipped.append(f"{pair['manifest']}: множество выходов не сверено со "
+                           f"скриптом — {' '.join(str(pair['reason']).split())} "
+                           f"Сверены только ссылки value: на имя и шаг.")
+        else:
+            printed = DERIVATIONS[pair["keys"]](pair, manifest, script)
+        problems += check(pair["manifest"], manifest.read_text(encoding="utf-8"),
+                          printed, pair["step"])
+    return problems, skipped
+
+
 # --- самопроверка: детектор обязан различать ------------------------------
-_GOOD = ('name: t\noutputs:\n  alpha:\n    value: "${{ steps.run.outputs.alpha }}"\n'
-         '  beta:\n    value: "${{ steps.run.outputs.beta }}"\n')
+_STEPS = '\nruns:\n  using: composite\n  steps:\n    - id: run\n      shell: bash\n      run: "true"\n'
+# Тот же источник `run` и соседний шаг `prep` перед ним: ссылка на
+# существующий, но не тот шаг.
+_TWO_STEPS = ('\nruns:\n  using: composite\n  steps:\n    - id: prep\n      shell: bash\n'
+              '      run: "true"\n    - id: run\n      shell: bash\n      run: "true"\n')
+_ALPHA = 'name: t\noutputs:\n  alpha:\n    value: "${{ steps.run.outputs.alpha }}"'
+_GOOD = _ALPHA + '\n  beta:\n    value: "${{ steps.run.outputs.beta }}"' + _STEPS
 _MUTANTS = (
-    ("ключ убран", 'name: t\noutputs:\n  alpha:\n    value: "${{ steps.run.outputs.alpha }}"\n'),
-    ("ключ лишний", _GOOD + '  gamma:\n    value: "${{ steps.run.outputs.gamma }}"\n'),
+    ("ключ убран", _ALPHA + _STEPS),
+    ("ключ лишний", _ALPHA + '\n  beta:\n    value: "${{ steps.run.outputs.beta }}"'
+     '\n  gamma:\n    value: "${{ steps.run.outputs.gamma }}"' + _STEPS),
     ("ссылка на чужое имя",
-     'name: t\noutputs:\n  alpha:\n    value: "${{ steps.run.outputs.alpha }}"\n'
-     '  beta:\n    value: "${{ steps.run.outputs.alpha }}"\n'),
+     _ALPHA + '\n  beta:\n    value: "${{ steps.run.outputs.alpha }}"' + _STEPS),
+    ("ссылка на несуществующий шаг",
+     _ALPHA + '\n  beta:\n    value: "${{ steps.other.outputs.beta }}"' + _STEPS),
+    ("ссылка на соседний шаг",
+     _ALPHA + '\n  beta:\n    value: "${{ steps.prep.outputs.beta }}"' + _TWO_STEPS),
+    ("шаг-источник переименован", _GOOD.replace("    - id: run\n", "    - id: main\n")),
 )
 
 
-def selftest() -> list:
+def selftest_check() -> list:
     problems = []
-    if check("фикстура", _GOOD, {"alpha", "beta"}):
-        problems.append("самопроверка: детектор нашёл нарушение в ЗДОРОВОМ манифесте")
+    for label, text in (("здоровый", _GOOD),
+                        ("здоровый с соседним шагом", _GOOD.replace(_STEPS, _TWO_STEPS))):
+        if check("фикстура", text, {"alpha", "beta"}, "run"):
+            problems.append(f"самопроверка: детектор нашёл нарушение в манифесте "
+                            f"«{label}» — ложная тревога")
     for label, text in _MUTANTS:
-        if not check("фикстура", text, {"alpha", "beta"}):
+        if not check("фикстура", text, {"alpha", "beta"}, "run"):
             problems.append(f"самопроверка: мутант «{label}» не пойман — детектор слеп")
+    # unverified: множества не сравниваются, а ссылки на имя и шаг — да.
+    text = dict(_MUTANTS)
+    for label in ("ссылка на чужое имя", "ссылка на соседний шаг"):
+        if not check("фикстура", text[label], None, "run"):
+            problems.append(f"самопроверка: у пары unverified мутант «{label}» не пойман")
+    if check("фикстура", text["ключ убран"], None, "run"):
+        problems.append("самопроверка: у пары unverified сравнились множества, "
+                        "которых нет")
     return problems
 
 
-# Мутанты НАСТОЯЩИХ манифестов: (манифест, что сломано, regex, замена).
-# Текстовые мутанты выше проверяют сравнение множеств и не видят деривацию:
-# линт, который спрашивает не тот код или не тот манифест, прошёл бы их
-# зелёным. Эти правят копию дерева и гоняют всю цепочку. Каждый — ровно
-# дефект, мимо которого первая редакция прошла бы молча.
-_REAL_MUTANTS = (
-    ("actions/profile-resolve/action.yml", "выход стадии sca убран",
-     r"(?m)^  sca:\n(?:    .*\n)+", ""),
-    ("actions/profile-resolve/action.yml", "стадия в --implemented без выхода",
-     r'(--implemented "[^"]+)"', r'\1,selftest-phantom"'),
-    ("actions/pin-apply/action.yml", "выход moved убран",
-     r"(?m)^  moved:\n(?:    .*\n)+", ""),
-)
+def selftest_unlisted() -> list:
+    """Охват — через audit(), а не через unlisted() напрямую: проверка, которую
+    проход перестал звать, иначе оставалась бы зелёной."""
+    problems = []
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for name, text in (("listed", _GOOD), ("stray", _GOOD), ("quiet", "name: q" + _STEPS)):
+            (root / "actions" / name).mkdir(parents=True)
+            (root / "actions" / name / "action.yml").write_text(text, encoding="utf-8")
+        found, _ = audit(root, {"pairs": [{
+            "manifest": "actions/listed/action.yml", "script": "actions/listed/action.yml",
+            "keys": UNVERIFIED, "step": "run", "reason": "фикстура"}], "mutants": []})
+        if not any(p.startswith("actions/stray/action.yml:") for p in found):
+            problems.append("самопроверка: манифест с выходами вне списка не пойман — "
+                            "охват держится на памяти")
+        if any(p.startswith(("actions/listed/", "actions/quiet/")) for p in found):
+            problems.append(f"самопроверка: охват ругается на манифест в списке или "
+                            f"без выходов: {found}")
+    return problems
+
+
+def selftest_steps() -> list:
+    """step_keys: отказ шага — «неизвестно», файлы команд — не настоящие."""
+    problems = []
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        # Файлы команд «настоящей джобы»: шаг, исполненный линтом, обязан
+        # писать мимо них.
+        job = {name: base / f"job-{name.lower()}" for name in FILE_COMMANDS}
+        saved = {name: os.environ.get(name) for name in FILE_COMMANDS}
+
+        def run(body: str):
+            manifest = base / "action.yml"
+            manifest.write_text(yaml.safe_dump(
+                {"name": "t", "runs": {"using": "composite", "steps": [
+                    {"id": "run", "shell": "bash", "run": body}]}}), encoding="utf-8")
+            for path in job.values():
+                path.write_text("", encoding="utf-8")
+            os.environ.update({name: str(path) for name, path in job.items()})
+            try:
+                return step_keys(manifest, "run", {})
+            except SystemExit as exc:
+                return exc
+            finally:
+                for name, value in saved.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+
+        got = run('echo "alpha=1" >> "$GITHUB_OUTPUT"\nexit 3\n')
+        if not isinstance(got, SystemExit):
+            problems.append(f"самопроверка: шаг упал (rc 3), напечатав ключи {sorted(got)}, "
+                            f"а линт их принял — отказ шага не учтён")
+        got = run('echo "ключей нет"\n')
+        if not isinstance(got, SystemExit):
+            problems.append("самопроверка: шаг отработал без ключей, а линт принял "
+                            "пустое множество")
+        got = run('echo "alpha=1" >> "$GITHUB_OUTPUT"\n'
+                  'echo "LEAK=1" >> "$GITHUB_ENV"\necho /leak >> "$GITHUB_PATH"\n'
+                  'echo "leak=1" >> "$GITHUB_STATE"\necho "# leak" >> "$GITHUB_STEP_SUMMARY"\n')
+        if got != {"alpha"}:
+            problems.append(f"самопроверка: здоровый шаг дал {got!r} вместо {{'alpha'}}")
+        touched = sorted(name for name, path in job.items()
+                         if path.read_text(encoding="utf-8"))
+        if touched:
+            problems.append(f"самопроверка: шаг дописал в {', '.join(touched)} "
+                            f"настоящей джобы — файлы команд не подменены")
+    return problems
+
+
+def selftest_data() -> list:
+    """Форма файла пар: пробелы в данных — отказ, а не тишина."""
+    problems = []
+    pair = {"manifest": "actions/a/action.yml", "script": "actions/a/a.py",
+            "keys": "step", "step": "run"}
+    mutant = {"manifest": "actions/a/action.yml", "label": "x", "pattern": "x", "repl": ""}
+    if validate_data({"pairs": [pair], "mutants": [mutant]}):
+        problems.append("самопроверка: годный файл пар отвергнут")
+    for label, data in (
+        ("пара без мутанта", {"pairs": [pair], "mutants": []}),
+        ("unverified без причины", {"pairs": [{**pair, "keys": UNVERIFIED}],
+                                    "mutants": [mutant]}),
+        ("неизвестный способ", {"pairs": [{**pair, "keys": "guess"}], "mutants": [mutant]}),
+        ("пустой pairs", {"pairs": [], "mutants": []}),
+    ):
+        if not validate_data(data):
+            problems.append(f"самопроверка: файл пар «{label}» принят")
+    return problems
+
+
+def selftest() -> list:
+    return selftest_check() + selftest_unlisted() + selftest_steps() + selftest_data()
+
+
 # Что читают деривации: манифесты и скрипты под actions/, профили —
 # шаг profile-resolve (`${GITHUB_ACTION_PATH}/../../profiles`).
 _TREE = ("actions", "profiles")
 
 
-def audit(root: Path) -> list:
-    problems = []
-    for manifest_rel, script_rel, emitted in PAIRS:
-        manifest, script = root / manifest_rel, root / script_rel
-        if not manifest.is_file() or not script.is_file():
-            # Пропавшая пара — «не смогли проверить», а не «чисто»: молчание
-            # здесь неотличимо от здоровья, и это ровно тот класс, ради
-            # которого детектор написан.
-            raise SystemExit(f"::error::нет пары {manifest_rel} / {script_rel} — "
-                             f"проверять нечем")
-        problems += check(manifest_rel, manifest.read_text(encoding="utf-8"),
-                          emitted(manifest, script))
-    return problems
-
-
-def selftest_real(root: Path) -> list:
+def selftest_real(root: Path, data: dict) -> list:
     """Каждый мутант настоящего манифеста обязан добавить нарушение.
 
-    Сравнение — с чистой копией, а не с нулём: если в самом дереве уже есть
-    расхождение, о нём скажет основной проход, а здесь важно одно — видит ли
-    детектор то, что внёс мутант. Мутация, не изменившая файл (regex
-    промахнулся после правки манифеста), — тоже слепота: «не пойман» и «не
-    было чего ловить» иначе неразличимы.
+    Мутанты — из файла пар этого репо: у близнецов манифесты разные, и
+    общий файл не может знать, что в них ломать. Сравнение — с чистой
+    копией, а не с нулём: если в самом дереве уже есть расхождение, о нём
+    скажет основной проход, а здесь важно одно — видит ли детектор то, что
+    внёс мутант. Мутация, не изменившая файл (regex промахнулся после правки
+    манифеста), — тоже слепота: «не пойман» и «не было чего ловить» иначе
+    неразличимы.
     """
     problems = []
     with tempfile.TemporaryDirectory() as tmp:
         copy = Path(tmp)
         for sub in _TREE:
-            shutil.copytree(root / sub, copy / sub,
-                            ignore=shutil.ignore_patterns("__pycache__"))
-        clean = set(audit(copy))
-        for rel, label, pattern, repl in _REAL_MUTANTS:
+            if (root / sub).is_dir():
+                shutil.copytree(root / sub, copy / sub,
+                                ignore=shutil.ignore_patterns("__pycache__"))
+        clean = set(audit(copy, data)[0])
+        for mutant in data["mutants"]:
+            rel, label = mutant["manifest"], mutant["label"]
             path = copy / rel
             original = path.read_text(encoding="utf-8")
-            mutated, hits = re.subn(pattern, repl, original)
+            mutated, hits = re.subn(mutant["pattern"], mutant["repl"], original)
             if hits != 1:
                 problems.append(f"самопроверка: мутация «{label}» промахнулась мимо "
                                 f"{rel} (совпадений {hits}) — детектор не проверен")
                 continue
             path.write_text(mutated, encoding="utf-8")
             try:
-                caught = set(audit(copy)) - clean
+                caught = set(audit(copy, data)[0]) - clean
             finally:
                 path.write_text(original, encoding="utf-8")
             if not caught:
@@ -297,14 +552,17 @@ def selftest_real(root: Path) -> list:
 
 def main() -> int:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+    data = load_data(root)
 
     # Проход и самопроверка — оба, всегда. Мутация промахивается и тогда,
     # когда её цель уже сломана в самом дереве (выход `sca` убран — убирать
     # нечего), и одно «детектор не проверен» без настоящего нарушения рядом
     # отправило бы читать не туда. Проход — первым: отказ деривации на
     # настоящем дереве должен назвать настоящий путь, а не путь копии.
-    problems = audit(root)
-    blind = selftest() + selftest_real(root)
+    problems, skipped = audit(root, data)
+    blind = selftest() + selftest_real(root, data)
+    for s in skipped:
+        print(f"::warning::не проверено: {s}", file=sys.stderr)
     if problems or blind:
         for p in problems + blind:
             print(f"::error::{p}", file=sys.stderr)
@@ -312,7 +570,10 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    print(f"OK: {len(PAIRS)} манифест(ов) объявляют ровно то, что печатают их скрипты")
+    checked = len(data["pairs"]) - len(skipped)
+    print(f"OK: {checked} манифест(ов) объявляют ровно то, что печатают их скрипты"
+          + (f"; не проверено {len(skipped)} (warning выше, причина — в {DATA_REL})"
+             if skipped else ""))
     return 0
 
 
