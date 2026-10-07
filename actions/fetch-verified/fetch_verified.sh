@@ -46,9 +46,13 @@
 #   --sums-url  файл контрольных сумм апстрима (формат `sha256  имя`)
 #   --sha256    ожидаемая сумма пином в НАШЕМ репозитории
 #
-#   --cosign-bin/-sig/-cert/-identity/-issuer — проверка подписи файла
-#               сумм (keyless, Fulcio+Rekor). Все пять или ни одного;
-#               только вместе с --sums-url. Бинарь cosign даёт вызывающий:
+#   --cosign-bin/-identity/-issuer + форма подписи — проверка подписи файла
+#               сумм (keyless, Fulcio+Rekor). Форма ровно одна: пара
+#               --cosign-sig/--cosign-cert (отдельные .sig и .pem) либо
+#               --cosign-bundle (sigstore bundle `.sigstore.json`: подпись,
+#               сертификат и запись Rekor одним файлом — так публикует syft
+#               с 1.54.0, devsecops-pipeline#98). Всё или ничего; только
+#               вместе с --sums-url. Бинарь cosign даёт вызывающий:
 #               скрипт, который сам себе качает верификатор, проверять его
 #               нечем — яйцо и курица. Ставить cosign полагается тем же
 #               скриптом с --sha256.
@@ -72,7 +76,7 @@
 set -euo pipefail
 
 URL="" SUMS_URL="" SHA256="" MEMBER="" DEST="" OUTPUT="" EXTRACT_ALL=""
-COSIGN_BIN="" COSIGN_SIG="" COSIGN_CERT="" COSIGN_IDENTITY="" COSIGN_ISSUER=""
+COSIGN_BIN="" COSIGN_SIG="" COSIGN_CERT="" COSIGN_BUNDLE="" COSIGN_IDENTITY="" COSIGN_ISSUER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --url)         URL="$2"; shift 2 ;;
@@ -85,6 +89,7 @@ while [ $# -gt 0 ]; do
     --cosign-bin)      COSIGN_BIN="$2"; shift 2 ;;
     --cosign-sig)      COSIGN_SIG="$2"; shift 2 ;;
     --cosign-cert)     COSIGN_CERT="$2"; shift 2 ;;
+    --cosign-bundle)   COSIGN_BUNDLE="$2"; shift 2 ;;
     --cosign-identity) COSIGN_IDENTITY="$2"; shift 2 ;;
     --cosign-issuer)   COSIGN_ISSUER="$2"; shift 2 ;;
     *) echo "::error::fetch-verified: неизвестный аргумент $1" >&2; exit 2 ;;
@@ -111,22 +116,38 @@ if [ "$modes" -ne 1 ]; then
   exit 2
 fi
 
-# Пять cosign-флагов задаются вместе или не задаются вовсе. Считаем, а не
+# Cosign-флаги задаются полным набором или не задаются вовсе. Считаем, а не
 # перечисляем пары, по той же причине, что и режимы установки.
+#
+# Набор — бинарь, личность, издатель и ровно ОДНА форма подписи: пара
+# --cosign-sig/--cosign-cert или --cosign-bundle (#98). Обе формы сразу —
+# отказ, а не «проверим какую-нибудь»: какую из них проверил verify-blob,
+# по логу было бы не понять.
 #
 # Личность и издатель ОБЯЗАТЕЛЬНЫ, а не опциональны: `verify-blob` без них
 # проверяет «подписано хоть кем-то», то есть принимает подпись любого, кто
 # сумел получить сертификат Fulcio, — защита, которая выглядит защитой и
-# ею не является.
-cosign_flags=0
-for _v in "$COSIGN_BIN" "$COSIGN_SIG" "$COSIGN_CERT" "$COSIGN_IDENTITY" "$COSIGN_ISSUER"; do
-  [ -n "$_v" ] && cosign_flags=$((cosign_flags + 1))
+# ею не является. Bundle этого не меняет: сертификат в нём тот же Fulcio.
+cosign_core=0
+for _v in "$COSIGN_BIN" "$COSIGN_IDENTITY" "$COSIGN_ISSUER"; do
+  [ -n "$_v" ] && cosign_core=$((cosign_core + 1))
 done
-if [ "$cosign_flags" -ne 0 ] && [ "$cosign_flags" -ne 5 ]; then
-  echo "::error::fetch-verified: cosign требует все пять флагов (--cosign-bin --cosign-sig --cosign-cert --cosign-identity --cosign-issuer), задано $cosign_flags" >&2
+cosign_pair=0
+for _v in "$COSIGN_SIG" "$COSIGN_CERT"; do
+  [ -n "$_v" ] && cosign_pair=$((cosign_pair + 1))
+done
+cosign_bundle=0
+[ -n "$COSIGN_BUNDLE" ] && cosign_bundle=1
+cosign_mode=""
+if [ "$cosign_core" -eq 3 ] && [ "$cosign_pair" -eq 2 ] && [ "$cosign_bundle" -eq 0 ]; then
+  cosign_mode=sig
+elif [ "$cosign_core" -eq 3 ] && [ "$cosign_pair" -eq 0 ] && [ "$cosign_bundle" -eq 1 ]; then
+  cosign_mode=bundle
+elif [ $((cosign_core + cosign_pair + cosign_bundle)) -ne 0 ]; then
+  echo "::error::fetch-verified: cosign требует --cosign-bin --cosign-identity --cosign-issuer и ровно одну форму подписи: --cosign-sig с --cosign-cert либо --cosign-bundle (задано: базовых $cosign_core из 3, sig/cert $cosign_pair из 2, bundle $cosign_bundle)" >&2
   exit 2
 fi
-if [ "$cosign_flags" -eq 5 ] && [ -z "$SUMS_URL" ]; then
+if [ -n "$cosign_mode" ] && [ -z "$SUMS_URL" ]; then
   # cosign здесь проверяет подпись ФАЙЛА СУММ. С пином в репозитории
   # проверять нечего: доверие уже не зависит от апстрима.
   echo "::error::fetch-verified: cosign применим только с --sums-url (подписывается файл сумм)" >&2
@@ -198,18 +219,25 @@ if [ -n "$SHA256" ]; then
 else
   dl "$SUMS_URL" "$WORK/SUMS" "файл сумм"
 
-  if [ "$cosign_flags" -eq 5 ]; then
+  if [ -n "$cosign_mode" ]; then
     # Подпись проверяется ДО того, как из файла сумм что-либо прочитано:
     # непроверенный файл сумм не должен влиять даже на выбор строки.
-    dl "$COSIGN_SIG"  "$WORK/SUMS.sig" "подпись файла сумм"
-    dl "$COSIGN_CERT" "$WORK/SUMS.pem" "сертификат подписи"
+    if [ "$cosign_mode" = bundle ]; then
+      # Bundle — подпись, сертификат и запись Rekor одним файлом; личность
+      # и издатель сверяются с сертификатом из него теми же флагами.
+      dl "$COSIGN_BUNDLE" "$WORK/SUMS.sigstore.json" "bundle подписи файла сумм"
+      material=(--bundle "$WORK/SUMS.sigstore.json")
+    else
+      dl "$COSIGN_SIG"  "$WORK/SUMS.sig" "подпись файла сумм"
+      dl "$COSIGN_CERT" "$WORK/SUMS.pem" "сертификат подписи"
+      material=(--certificate "$WORK/SUMS.pem" --signature "$WORK/SUMS.sig")
+    fi
     if "$COSIGN_BIN" verify-blob \
-         --certificate "$WORK/SUMS.pem" \
-         --signature "$WORK/SUMS.sig" \
+         "${material[@]}" \
          --certificate-identity-regexp "$COSIGN_IDENTITY" \
          --certificate-oidc-issuer "$COSIGN_ISSUER" \
          "$WORK/SUMS" >"$WORK/cosign.out" 2>&1; then
-      echo "fetch-verified: подпись файла сумм проверена (identity ~ $COSIGN_IDENTITY, issuer $COSIGN_ISSUER)"
+      echo "fetch-verified: подпись файла сумм проверена ($cosign_mode; identity ~ $COSIGN_IDENTITY, issuer $COSIGN_ISSUER)"
     else
       echo "::error::fetch-verified: подпись файла сумм НЕ прошла проверку — отказываюсь ставить" >&2
       sed 's/^/  /' "$WORK/cosign.out" >&2

@@ -10,10 +10,15 @@
 # обязан проверяться keyless — то есть там, где sigstore достижим.
 #
 # Из ночного контейнера sigstore закрыт прокси (проверено 2026-08-04:
-# `tuf: failed to download 10.root.json … Forbidden`), поэтому случаи 3 и 4
+# `tuf: failed to download 10.root.json … Forbidden`), поэтому случаи 3–8
 # зелёные только в CI. Скипа у них НЕТ намеренно: молча пропущенная
 # проверка неотличима от пройденной, а это и есть болезнь, которую чинит
-# #33. Локально фикстура честно краснеет.
+# #33. Локально фикстура честно краснеет. Сети не требует только случай 1.
+#
+# Формы подписи две, и отказать обязана каждая (devsecops-pipeline#98):
+# пара .sig/.pem (случаи 3–5, syft до 1.52.0 включительно) и sigstore
+# bundle (случаи 6–8, syft с 1.54.0; 1.53 не выпускалась). syft-sbom
+# выбирает форму по версии, так что живы обе ветки.
 #
 # Вход: assert-cosign-sums.sh <путь к fetch_verified.sh> [<путь к cosign>]
 set -euo pipefail
@@ -36,6 +41,13 @@ SIG_URL="${SUMS_URL}.sig"
 CERT_URL="${SUMS_URL}.pem"
 IDENTITY='^https://github\.com/anchore/syft/\.github/workflows/release\.yaml@refs/heads/main$'
 ISSUER="https://token.actions.githubusercontent.com"
+# Первые релизы syft только с bundle — 1.54.0 и 1.54.1 (список ассетов
+# релизов, 2026-10-07); на 1.54.1 упал ночной бамп (devsecops-pipeline#102).
+# Личность и издатель те же.
+BUNDLE_VERSION="1.54.1"
+BUNDLE_BASE="https://github.com/anchore/syft/releases/download/v${BUNDLE_VERSION}"
+BUNDLE_SUMS_URL="${BUNDLE_BASE}/syft_${BUNDLE_VERSION}_checksums.txt"
+BUNDLE_URL="${BUNDLE_SUMS_URL}.sigstore.json"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -52,7 +64,7 @@ run_fv() { # -> rc в $RC, вывод в $OUT
   set -e
 }
 
-echo "1. конфигурационные отказы (сети не требуют)"
+echo "1. конфигурация и сборка вызова cosign (сети не требуют)"
 
 run_fv --url http://example.invalid/a.tgz --sums-url http://example.invalid/S \
        --dest "$TMP/d" --output a --cosign-bin /bin/true
@@ -67,6 +79,72 @@ run_fv --url http://example.invalid/a.tgz --sha256 "$(printf 'a%.0s' $(seq 64))"
                 || bad "cosign+--sha256: ожидал rc=2, получил $RC"
 # Без этого случая cosign молча ничего не проверял бы при пине: подписывается
 # файл сумм, а его в этом режиме нет вовсе.
+
+# Bundle (#98). rc=2 даёт и «неизвестный аргумент», поэтому сверяется ещё и
+# текст: отказ обязан быть отказом правила cosign-флагов.
+cosign_rule() { # <что> — rc=2 и текст правила, иначе провал
+  if [ "$RC" = "2" ] && printf '%s' "$OUT" | grep -q 'ровно одну форму подписи'; then
+    ok "$1 -> rc=2"
+  else
+    bad "$1: ожидал rc=2 по правилу cosign-флагов, получил rc=$RC"
+    printf '%s\n' "$OUT" | sed 's/^/       /'
+  fi
+}
+run_fv --url http://example.invalid/a.tgz --sums-url http://example.invalid/S \
+       --dest "$TMP/d" --output a \
+       --cosign-bin /bin/true --cosign-sig u --cosign-cert u --cosign-bundle u \
+       --cosign-identity i --cosign-issuer s
+cosign_rule "обе формы подписи сразу (sig/cert и bundle)"
+run_fv --url http://example.invalid/a.tgz --sums-url http://example.invalid/S \
+       --dest "$TMP/d" --output a --cosign-bin /bin/true --cosign-bundle u
+cosign_rule "bundle без личности и издателя"
+
+# Сборка вызова verify-blob — заглушкой вместо cosign, по file://. Подпись
+# заглушка не проверяет (это делают случаи 3–8 настоящим cosign): она пишет
+# аргументы и отвечает кодом STUB_RC. Проверяется, ЧТО скрипт передаёт
+# верификатору в каждой форме и что отказ верификатора — отказ установки.
+cat > "$TMP/cosign-stub" <<'EOF'
+#!/usr/bin/env bash
+printf '%s ' "$@" > "$STUB_LOG"
+exit "$STUB_RC"
+EOF
+chmod +x "$TMP/cosign-stub"
+export STUB_LOG="$TMP/stub.log" STUB_RC=0
+printf 'ассет\n' > "$TMP/asset.bin"
+printf '%s  asset.bin\n' "$(sha256sum "$TMP/asset.bin" | awk '{print $1}')" > "$TMP/stub-sums.txt"
+printf 'bundle\n' > "$TMP/stub.sigstore.json"
+printf 'sig\n' > "$TMP/stub.sig"
+printf 'pem\n' > "$TMP/stub.pem"
+stub_fv() { # <dest> <флаги формы подписи...>
+  local dest="$1"; shift
+  : > "$STUB_LOG"
+  run_fv --url "file://$TMP/asset.bin" --sums-url "file://$TMP/stub-sums.txt" \
+         --dest "$dest" --output asset --cosign-bin "$TMP/cosign-stub" \
+         --cosign-identity I --cosign-issuer S "$@"
+}
+stub_fv "$TMP/stub-b" --cosign-bundle "file://$TMP/stub.sigstore.json"
+case "$RC $(cat "$STUB_LOG")" in
+  "0 verify-blob --bundle "*"/SUMS.sigstore.json --certificate-identity-regexp I --certificate-oidc-issuer S "*"/SUMS ")
+    ok "bundle: verify-blob --bundle <файл> с личностью и издателем" ;;
+  *) bad "bundle: вызов verify-blob собран не так (rc=$RC): $(cat "$STUB_LOG")"
+     printf '%s\n' "$OUT" | sed 's/^/       /' ;;
+esac
+stub_fv "$TMP/stub-s" --cosign-sig "file://$TMP/stub.sig" --cosign-cert "file://$TMP/stub.pem"
+case "$RC $(cat "$STUB_LOG")" in
+  "0 verify-blob --certificate "*"/SUMS.pem --signature "*"/SUMS.sig --certificate-identity-regexp I --certificate-oidc-issuer S "*"/SUMS ")
+    ok "sig/cert: verify-blob --certificate/--signature с личностью и издателем" ;;
+  *) bad "sig/cert: вызов verify-blob собран не так (rc=$RC): $(cat "$STUB_LOG")"
+     printf '%s\n' "$OUT" | sed 's/^/       /' ;;
+esac
+STUB_RC=1
+stub_fv "$TMP/stub-f" --cosign-bundle "file://$TMP/stub.sigstore.json"
+STUB_RC=0
+if [ "$RC" = "1" ] && printf '%s' "$OUT" | grep -q 'подпись файла сумм НЕ прошла' \
+   && [ ! -e "$TMP/stub-f/asset" ]; then
+  ok "bundle: отказ верификатора -> rc=1, ничего не установлено"
+else
+  bad "bundle: отказ верификатора не стал отказом установки (rc=$RC)"
+fi
 
 echo "2. cosign под рукой"
 if [ -z "$COSIGN" ] || [ ! -x "$COSIGN" ]; then
@@ -139,6 +217,52 @@ else
 fi
 # Это и есть причина, по которой личность и издатель обязательны: без них
 # verify-blob принимает подпись любого, кто получил сертификат Fulcio.
+
+echo "6. bundle: настоящая подпись syft ${BUNDLE_VERSION} принимается"
+run_fv --url "${BUNDLE_BASE}/syft_${BUNDLE_VERSION}_linux_amd64.tar.gz" \
+       --sums-url "$BUNDLE_SUMS_URL" --dest "$TMP/good-bundle" --member syft \
+       --cosign-bin "$COSIGN" --cosign-bundle "$BUNDLE_URL" \
+       --cosign-identity "$IDENTITY" --cosign-issuer "$ISSUER"
+if [ "$RC" = "0" ] && [ -x "$TMP/good-bundle/syft" ]; then
+  ok "bundle принят, бинарь установлен"
+else
+  bad "положительный контроль bundle упал (rc=$RC)"
+  printf '%s\n' "$OUT" | sed 's/^/       /'
+fi
+# Контроль обязателен по той же причине, что случай 3: проверка, отвергающая
+# всё, прошла бы случаи 7 и 8.
+
+echo "7. bundle: подделанный файл сумм отвергается"
+get "$BUNDLE_SUMS_URL" "$TMP/bsums.txt"
+get "$BUNDLE_URL" "$TMP/bsums.sigstore.json"
+# Первый знак первой строки меняется всегда (0 -> 1, остальное -> 0), а не
+# «если строка начинается с 0»: у чужого файла сумм такой строки может не быть.
+awk 'NR == 1 { $0 = (substr($0, 1, 1) == "0" ? "1" : "0") substr($0, 2) } { print }' \
+  "$TMP/bsums.txt" > "$TMP/bsums-bad.txt"
+cmp -s "$TMP/bsums.txt" "$TMP/bsums-bad.txt" && bad "порча не изменила файл — замер недействителен"
+run_fv --url "file://$TMP/fake.tgz" --sums-url "file://$TMP/bsums-bad.txt" \
+       --dest "$TMP/bad-bundle" --output fake \
+       --cosign-bin "$COSIGN" --cosign-bundle "file://$TMP/bsums.sigstore.json" \
+       --cosign-identity "$IDENTITY" --cosign-issuer "$ISSUER"
+if [ "$RC" = "1" ] && printf '%s' "$OUT" | grep -q 'подпись файла сумм НЕ прошла'; then
+  ok "подделанный файл сумм -> rc=1, отказ именно по подписи"
+else
+  bad "bundle, подделка: ожидал rc=1 и отказ по подписи, получил rc=$RC"
+fi
+[ -e "$TMP/bad-bundle/fake" ] && bad "файл установлен несмотря на отказ подписи" \
+                              || ok "ничего не установлено"
+
+echo "8. bundle: чужая личность отвергается (подпись валидна, подписант не тот)"
+run_fv --url "file://$TMP/fake.tgz" --sums-url "file://$TMP/bsums.txt" \
+       --dest "$TMP/who-bundle" --output fake \
+       --cosign-bin "$COSIGN" --cosign-bundle "file://$TMP/bsums.sigstore.json" \
+       --cosign-identity '^https://github\.com/зло/зло@refs/heads/main$' \
+       --cosign-issuer "$ISSUER"
+if [ "$RC" = "1" ] && printf '%s' "$OUT" | grep -q 'подпись файла сумм НЕ прошла'; then
+  ok "неожиданная личность -> отказ"
+else
+  bad "bundle, чужая личность: ожидал rc=1, получил rc=$RC"
+fi
 
 echo
 if [ "$fails" -eq 0 ]; then
