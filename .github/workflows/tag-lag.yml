@@ -43,10 +43,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      # Креды не хранятся: репо публичный, и fetch тегов шагом ниже идёт
+      # анонимно. У приватного близнеца они остаются — там без них fetch
+      # не пройдёт.
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: "Сравнить v1 с main по путям, которые видит потребитель"
         id: lag

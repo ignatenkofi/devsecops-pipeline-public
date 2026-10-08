@@ -47,7 +47,14 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Креды на диске не остаются и здесь (#62): до push джоба исполняет
+      # бинари-кандидаты стадий, и токен с `contents: write` в git-конфиге
+      # был бы виден каждому из них. Токен получает только сам `git push` в
+      # шаге «Ветка bump/tools + PR» — helper'ом gh из `GH_TOKEN` этого
+      # шага, на одну команду. Исключений в репо нет.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Текущие пины и свежие версии апстрима
         id: versions
@@ -109,7 +116,7 @@ jobs:
           # бамп версии оставил бы стадию с суммой от старого бинаря, и гард
           # начал бы падать не по делу — отказ, который выглядит как атака,
           # хуже отсутствия отказа.
-          curl -sfL -o /tmp/osv-new/osv-scanner \
+          curl -fsSL -o /tmp/osv-new/osv-scanner \
             "https://github.com/google/osv-scanner/releases/download/v${V}/osv-scanner_linux_amd64"
           chmod +x /tmp/osv-new/osv-scanner
           osv_sum="$(sha256sum /tmp/osv-new/osv-scanner | awk '{print $1}')"
@@ -234,7 +241,12 @@ jobs:
           fi
           git commit -m "chore: bump пинов инструментов (nightly)"
           # Ветка стабильная: повторные ночи обновляют тот же PR, а не плодят новые.
-          git push -f origin bump/tools
+          # Токен — только этой команде (#62): чекаут кредов не хранит, helper
+          # gh отдаёт `GH_TOKEN` из env шага, пустой helper перед ним
+          # сбрасывает унаследованные из конфигов. `gh auth setup-git` не
+          # годится: пишет ~/.gitconfig, который на self-hosted переживёт джобу.
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+            push -f origin bump/tools
 
           # Тело — в файл вне рабочего дерева: gh ниже считает нетронутый
           # чекаут признаком здоровья и предупреждает о каждом лишнем файле.
