@@ -25,8 +25,11 @@ fail() { echo "  FAIL: $*" >&2; rc=1; }
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/gh" <<'STUB'
 #!/usr/bin/env bash
-# Заглушка gh: список открытых issue берётся из $GH_STUB_ISSUES (JSON),
-# все вызовы дописываются в $GH_STUB_LOG.
+# Заглушка gh: список открытых issue берётся из $GH_STUB_ISSUES (JSON в
+# порядке настоящего gh — новые первыми), все вызовы дописываются в
+# $GH_STUB_LOG. `issue list` режет выдачу по `--limit` (дефолт gh — 30): без
+# этого случаи «искомая за первой сотней» зеленели бы и на прежнем
+# `--limit 100` (#63).
 #
 # Отказы: подкоманда из $GH_STUB_FAIL_CMD падает первые N раз, где N лежит в
 # файле $GH_STUB_FAILS_LEFT (счётчик в файле, а не в переменной, потому что
@@ -43,7 +46,14 @@ if [ "${1:-}" = "issue" ] && [ "${2:-}" = "${GH_STUB_FAIL_CMD:-}" ]; then
     fi
 fi
 if [ "${1:-}" = "issue" ] && [ "${2:-}" = "list" ]; then
-    printf '%s' "${GH_STUB_ISSUES:-[]}"
+    limit=30
+    while [ $# -gt 0 ]; do
+        [ "$1" = "--limit" ] && limit="$2"
+        shift
+    done
+    python3 -c 'import json, sys
+print(json.dumps(json.loads(sys.argv[1])[:int(sys.argv[2])], ensure_ascii=False, separators=(",", ":")))' \
+        "${GH_STUB_ISSUES:-[]}" "$limit"
 elif [ "${1:-}" = "issue" ] && [ "${2:-}" = "create" ]; then
     printf 'https://github.com/o/r/issues/999\n'
 fi
@@ -70,6 +80,19 @@ calls() { cat "$GH_STUB_LOG"; }
 out()   { cat "$TMP/out"; }
 
 TITLE="nightly-bump: ночной прогон падает"
+
+# gen_issues <чужих> oldest|newest|none — JSON открытых issue в порядке gh
+# (новые первыми): чужие с убывающими номерами; искомая — самая старая (#1)
+# или самая новая (#<чужих+1>), или её нет.
+gen_issues() {
+    python3 -c 'import json, sys
+n, where, title = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+top = n + 1 if where == "oldest" else n
+other = [{"number": k, "title": "other %d" % k} for k in range(top, top - n, -1)]
+items = {"oldest": other + [{"number": 1, "title": title}],
+         "newest": [{"number": n + 1, "title": title}] + other, "none": other}[where]
+print(json.dumps(items, ensure_ascii=False, separators=(",", ":")))' "$1" "$2" "$TITLE"
+}
 
 # --- 1. отказ без открытой issue — заводится новая ---------------------------
 run_case '[]' failure "$TITLE" "тело"
@@ -149,5 +172,48 @@ creates="$(calls | grep -c "^issue create")"
 if [ "$(cat "$TMP/rc")" != "0" ] && [ "$creates" = "1" ]; then
     ok "отказ записи не повторяется и виден снаружи"
 else fail "ожидался один create и ненулевой rc: rc=$(cat "$TMP/rc"), create×$creates"; fi
+
+# --- 13–14. искомая issue за первой сотней открытых (#63) --------------------
+# gh отдаёт новые первыми: 101 более новая чужая issue, искомая — самая
+# старая. Прежний `--limit 100` её не видел — failure заводил дубль, success
+# молчал.
+PAST_100="$(gen_issues 101 oldest)"
+run_case "$PAST_100" failure "$TITLE" "тело"
+if calls | grep -q "^issue comment 1 " && ! calls | grep -q "^issue create"; then
+    ok "отказ: issue за первой сотней найдена — комментарий, без дубля"
+else fail "ожидался issue comment 1 без create, вызовы: $(calls | tr '\n' '|')"; fi
+
+run_case "$PAST_100" success "$TITLE" "ушло"
+if calls | grep -q "^issue close 1 "; then ok "успех: issue за первой сотней закрыта"
+else fail "ожидался issue close 1, вызовы: $(calls | tr '\n' '|')"; fi
+
+# --- 15–16. выборка упёрлась в лимит, совпадения нет — отказ до записи -------
+# За краем выборки искомая может быть: create завёл бы дубль, а «issue нет»
+# оставил бы открытой старую.
+FULL="$(gen_issues 1000 none)"
+for verb in failure success; do
+    run_case "$FULL" "$verb" "$TITLE" "тело"
+    if [ "$(cat "$TMP/rc")" = "1" ] && out | grep -q "^::error::.*упор в лимит" \
+            && ! calls | grep -qE "^issue (create|comment|close)"; then
+        ok "$verb: упор в лимит без совпадения — отказ, ни одной записи вслепую"
+    else fail "$verb: ожидался rc 1 с ::error:: про лимит и без записей:" \
+              "rc=$(cat "$TMP/rc"), вызовы: $(calls | tr '\n' '|')"; fi
+done
+
+# --- 17. совпадение — ответ и при выборке, упёршейся в лимит -----------------
+run_case "$(gen_issues 999 newest)" failure "$TITLE" "тело"
+if [ "$(cat "$TMP/rc")" = "0" ] && calls | grep -q "^issue comment 1000 "; then
+    ok "совпадение в полной выборке — комментарий, отказа нет"
+else fail "ожидался issue comment 1000 и rc 0: rc=$(cat "$TMP/rc"), вызовы: $(calls | tr '\n' '|')"; fi
+
+# --- 18. больше сотни открытых, до лимита не дошли, совпадения нет -----------
+# Отсутствие доказано: выборка неполной не была. Гард, сработавший раньше
+# лимита (`>= 100`, лимит минус один), отказал бы здесь там, где надо завести
+# issue, — в любом репо со 100–999 открытыми.
+run_case "$(gen_issues 999 none)" failure "$TITLE" "тело"
+if [ "$(cat "$TMP/rc")" = "0" ] && calls | grep -q "^issue create" \
+        && ! out | grep -q "^::error::"; then
+    ok "999 открытых без совпадения — issue заводится, отказа нет"
+else fail "ожидался issue create, rc 0 и без ::error::: rc=$(cat "$TMP/rc"), вызовы: $(calls | tr '\n' '|')"; fi
 
 exit "$rc"
