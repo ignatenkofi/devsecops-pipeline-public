@@ -19,6 +19,17 @@
 не исполнялись ни разу за семь красных ночей: до них не доходило
 управление. Третий, под `always()`, работал — им и виден отказ.
 
+Если сигнал вынесен в отдельную джобу с `needs:` (сторож, читающий исход
+основной), шагового `always()` мало. Без статусной функции в
+`jobs.<id>.if` GitHub подставляет неявный `success()`, и при отказе
+`needs` джоба пропускается целиком — вместе с шагом под `always()`. Такой
+шаг засчитывается, только если и в `if` самой джобы стоит `always()` —
+целиком или операндом `&&`: `always() && github.event_name == 'schedule'`
+годится, в обёртке `${{ … }}` тоже. Подстроки мало: `!always()` и литерал
+`'always()'` её содержат, а джобу при отказе не запускают. Другая
+статусная функция (`!cancelled()`) правило не выполняет: как и на шаге,
+контракт здесь — `always()` (devsecops-pipeline-public#64).
+
 Почему линт, а не соглашение: сквозное правило, которое держится на памяти,
 ломается на СЛЕДУЮЩЕМ добавленном расписании, и ломается молча — новая
 джоба просто не заводит issue, а отличить это от «отказов не было» нельзя.
@@ -159,6 +170,22 @@ def triggers(doc: dict) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
+def job_survives_needs(job: dict) -> bool:
+    """Годна ли джоба как место сигнала при отказе её `needs` (см. шапку).
+
+    Без `needs:` — да: шаговый `always()` решает сам. С `needs:` — только
+    с `always()` в `if` джобы, целиком или операндом `&&`. Строковые
+    литералы вырезаются до разбора: `'always()'` — данные, а не вызов.
+    """
+    if not (job or {}).get("needs"):
+        return True
+    expr = str((job or {}).get("if") or "").strip()
+    if expr.startswith("${{") and expr.endswith("}}"):
+        expr = expr[3:-2]
+    expr = re.sub(r"'(?:[^']|'')*'", "''", expr)
+    return any(part.strip() == "always()" for part in expr.split("&&"))
+
+
 def check_workflow(rel: str, text: str) -> list:
     try:
         doc = yaml.safe_load(text) or {}
@@ -167,15 +194,28 @@ def check_workflow(rel: str, text: str) -> list:
     if not isinstance(doc, dict) or "schedule" not in triggers(doc):
         return []
 
-    seen_any = False
-    for job in (doc.get("jobs") or {}).values():
+    seen_any, skipped = False, []
+    for name, job in (doc.get("jobs") or {}).items():
         for step in (job or {}).get("steps") or []:
             if HEALTH_ACTION not in str((step or {}).get("uses", "")):
                 continue
             seen_any = True
-            if str((step or {}).get("if", "")).strip() == "always()":
+            if str((step or {}).get("if", "")).strip() != "always()":
+                continue
+            # Джобу проверяем ДО раннего выхода: иначе джоба с `needs:`
+            # зачлась бы по шагу, который при отказе не исполнится.
+            if job_survives_needs(job):
                 return []  # нашли годный — этого достаточно
+            skipped.append(str(name))
 
+    if skipped:
+        return [
+            f"{rel}: health-issue под `if: always()` стоит только в джобах "
+            f"с `needs:` без `always()` в `if` джобы "
+            f"({', '.join(sorted(set(skipped)))}) — шаговый `always()` "
+            f"исполняется, только если исполняется джоба, а без статусной "
+            f"функции в её `if` при отказе `needs` она пропускается целиком"
+        ]
     if seen_any:
         return [
             f"{rel}: у периодической джобы есть health-issue, но ни один "
@@ -216,10 +256,13 @@ def runner_kind(job: dict) -> str:
 
 
 def watchdog_warnings(rel: str, text: str) -> list:
-    """Сторож на мёртвом раннере: все `health-issue` под `always()` — на
-    self-hosted джобах, hosted-дублёра нет. Предупреждение, не ошибка:
-    см. шапку. Пусто, если сигнала нет вовсе (это ошибка check_workflow),
-    если хоть один сигнал стоит на hosted или если раннер неизвестен."""
+    """Сторож на мёртвом раннере: все годные `health-issue` (под `always()`,
+    в джобе с `needs:` — и с `always()` в `if` джобы) — на self-hosted
+    джобах, hosted-дублёра нет. Предупреждение, не ошибка: см. шапку.
+    Пусто, если годного сигнала нет вовсе (это ошибка check_workflow),
+    если хоть один сигнал стоит на hosted или если раннер неизвестен.
+    Hosted-сторож с `needs:` без `always()` в `if` дублёром не считается:
+    при отказе основной джобы он пропускается вместе с ней."""
     try:
         doc = yaml.safe_load(text) or {}
     except yaml.YAMLError:
@@ -232,7 +275,8 @@ def watchdog_warnings(rel: str, text: str) -> list:
         for step in (job or {}).get("steps") or []:
             if HEALTH_ACTION not in str((step or {}).get("uses", "")):
                 continue
-            if str((step or {}).get("if", "")).strip() == "always()":
+            if (str((step or {}).get("if", "")).strip() == "always()"
+                    and job_survives_needs(job)):
                 kinds.append((str(name), runner_kind(job)))
     if not kinds or any(k != SELF_HOSTED for _, k in kinds):
         return []
@@ -644,6 +688,46 @@ _MUTANTS = (
 # расписание, а гард шире своего правила шумит на исправном репозитории.
 _OUT_OF_SCOPE = _GOOD.replace("  schedule:\n    - cron: \"0 3 * * *\"", "  push:\n    branches: [main]")
 
+# Сигнал в отдельной джобе с `needs:` (devsecops-pipeline-public#64). Шаг
+# под always() во всех вариантах — меняется только `if` джобы: ровно там
+# расходятся прежний код (его не читал), проверка подстрокой и правило.
+_NEEDS_IF = "    if: always() && github.event_name == 'schedule'\n"
+_NEEDS_GOOD = """
+on:
+  schedule:
+    - cron: "0 3 * * *"
+jobs:
+  bump:
+    steps:
+      - uses: ./actions/pin-discover
+  health:
+    needs: bump
+""" + _NEEDS_IF + """\
+    steps:
+      - if: always()
+        uses: ./actions/health-issue
+"""
+
+
+def _with_job_if(cond: str) -> str:
+    return _NEEDS_GOOD.replace(_NEEDS_IF, f"    if: {cond}\n" if cond else "")
+
+
+_NEEDS_MUTANTS = (
+    ("джоба с needs: без if", _with_job_if("")),
+    ("if джобы с needs: без always()", _with_job_if("github.event_name == 'schedule'")),
+    # Подстрока `always()` в трёх ниже есть, а джобу при отказе они не запускают.
+    ("!always() в if джобы", _with_job_if("${{ !always() }}")),
+    ("always() строковым литералом", _with_job_if("github.event_name == 'always()'")),
+    ("&& always() && внутри литерала", _with_job_if("github.event_name == 'a && always() && b'")),
+)
+_NEEDS_CONTROLS = (
+    ("always() && … в if джобы", _NEEDS_GOOD),
+    ("if джобы в обёртке ${{ }}", _with_job_if("${{ always() && github.event_name == 'schedule' }}")),
+    ("always() вторым операндом", _with_job_if("github.event_name == 'schedule' && always()")),
+    ("if: always() у джобы", _with_job_if("always()")),
+)
+
 
 def _with_runner(text: str, runs_on: str) -> str:
     return text.replace("  bump:\n", f"  bump:\n    runs-on: {runs_on}\n")
@@ -666,9 +750,14 @@ _SELF_HOSTED_WITH_HOSTED_WATCHDOG = _SELF_HOSTED_ONLY + """\
       - if: always()
         uses: ./actions/health-issue
 """
+# Тот же сторож без `always()` в `if` джобы: при отказе `bump` он
+# пропускается вместе с ней — дублёром он не является.
+_SKIPPABLE_WATCHDOG = _SELF_HOSTED_WITH_HOSTED_WATCHDOG.replace(
+    "    needs: bump\n    if: always()\n", "    needs: bump\n")
 _WATCHDOG_MUTANTS = (
     ("сигнал только на self-hosted (список меток)", _SELF_HOSTED_ONLY),
     ("сигнал только на self-hosted (labels: в словаре)", _SELF_HOSTED_DICT),
+    ("hosted-сторож с needs: без always() в if джобы", _SKIPPABLE_WATCHDOG),
 )
 _WATCHDOG_CONTROLS = (
     ("раннер не указан", _GOOD),
@@ -737,6 +826,17 @@ def selftest() -> list:
     for label, text in _MUTANTS:
         if not check_workflow("фикстура", text):
             problems.append(f"самопроверка: мутант «{label}» не пойман — детектор слеп")
+
+    # Сигнал в джобе с `needs:`: мутант обязан упасть именно на `if` джобы
+    # (текст про `needs:`), контроль — пройти.
+    for label, text in _NEEDS_MUTANTS:
+        if not any("`needs:`" in p for p in check_workflow("фикстура", text)):
+            problems.append(f"самопроверка: мутант «{label}» не пойман — джоба "
+                            "с needs: зачтена по always() шага")
+    for label, text in _NEEDS_CONTROLS:
+        if check_workflow("фикстура", text):
+            problems.append(f"самопроверка: нарушение на контроле «{label}» — "
+                            "детектор шире своего правила")
 
     # Сторож на мёртвом раннере: предупреждение обязано сработать на
     # self-hosted-сигнале без дублёра и промолчать на каждом контроле.
