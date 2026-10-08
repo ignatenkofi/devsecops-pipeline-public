@@ -59,3 +59,13 @@ mutants:
     label: выход sca берёт значение из чужого шага
     pattern: 'steps\.resolve\.outputs\.sca\b'
     repl: 'steps.run.outputs.sca'
+  # Индексный синтаксис: REF_RE его не разбирает, и чужой шаг в такой форме
+  # давал «OK» (ревью #61).
+  - manifest: actions/profile-resolve/action.yml
+    label: выход secrets из чужого шага, индекс по шагу
+    pattern: 'steps\.resolve\.outputs\.secrets\b'
+    repl: "steps['run'].outputs.secrets"
+  - manifest: actions/profile-resolve/action.yml
+    label: выход secrets из чужого шага, индекс по имени выхода
+    pattern: 'steps\.resolve\.outputs\.secrets\b'
+    repl: "steps.run.outputs['secrets']"

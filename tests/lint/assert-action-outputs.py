@@ -87,6 +87,24 @@ DATA_REL = "tests/lint/action-outputs.yml"
 
 REF_RE = re.compile(r"steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)")
 
+# Ссылку на шаг в другой форме — индексной (`steps['run'].outputs.x`,
+# `steps.run.outputs['x']`), фильтром (`steps.*`) — REF_RE не разбирает, и
+# проверки имени и шага её не видят: чужой шаг в такой форме давал «OK»
+# (ревью #61). Поэтому `steps`, который REF_RE не разобрал целиком, —
+# нарушение, а не тишина.
+STEPS_RE = re.compile(r"(?<![\w.-])steps\b", re.IGNORECASE)
+
+
+def unparsed_steps(value: str) -> list:
+    """Ссылки на steps в `value:`, которые REF_RE не разбирает целиком."""
+    found = []
+    for token in STEPS_RE.finditer(value):
+        ref = REF_RE.match(value, token.start())
+        if ref is None or value[ref.end():ref.end() + 1] in (".", "["):
+            found.append(value[token.start():].split("}}")[0].strip())
+    return found
+
+
 # Файлы команд, через которые шаг Actions влияет на СЛЕДУЮЩИЕ шаги джобы.
 # Исполняя шаг манифеста, линт подменяет все пять, а не один GITHUB_OUTPUT:
 # унаследованный путь внутри Actions — файл настоящего шага selftest, и
@@ -306,7 +324,14 @@ def check(manifest_rel: str, manifest_text: str, printed, producer: str) -> list
                 f"— манифест обещает значение, которого не будет"
             )
     for name, body in sorted(declared.items()):
-        refs = REF_RE.findall(str((body or {}).get("value", "")))
+        value = str((body or {}).get("value", ""))
+        refs = REF_RE.findall(value)
+        for form in unparsed_steps(value):
+            problems.append(
+                f"{manifest_rel}: выход '{name}' ссылается на шаг в форме «{form}», "
+                f"которую линт не разбирает, — имя и шаг не сверены; пишите "
+                f"steps.<id>.outputs.<имя>"
+            )
         if refs and name not in [out for _, out in refs]:
             problems.append(
                 f"{manifest_rel}: выход '{name}' берёт значение из "
@@ -387,13 +412,22 @@ _MUTANTS = (
     ("ссылка на соседний шаг",
      _ALPHA + '\n  beta:\n    value: "${{ steps.prep.outputs.beta }}"' + _TWO_STEPS),
     ("шаг-источник переименован", _GOOD.replace("    - id: run\n", "    - id: main\n")),
+    # Индексный синтаксис: REF_RE его не разбирает, и до unparsed_steps оба
+    # мутанта давали «OK» (ревью #61).
+    ("индекс по шагу",
+     _ALPHA + '\n  beta:\n    value: "${{ steps[\'prep\'].outputs.beta }}"' + _TWO_STEPS),
+    ("индекс по имени выхода",
+     _ALPHA + '\n  beta:\n    value: "${{ steps.prep.outputs[\'beta\'] }}"' + _TWO_STEPS),
 )
 
 
 def selftest_check() -> list:
     problems = []
     for label, text in (("здоровый", _GOOD),
-                        ("здоровый с соседним шагом", _GOOD.replace(_STEPS, _TWO_STEPS))):
+                        ("здоровый с соседним шагом", _GOOD.replace(_STEPS, _TWO_STEPS)),
+                        ("здоровый с inputs.steps рядом",
+                         _GOOD.replace("steps.run.outputs.beta }}",
+                                       "steps.run.outputs.beta || inputs.steps }}"))):
         if check("фикстура", text, {"alpha", "beta"}, "run"):
             problems.append(f"самопроверка: детектор нашёл нарушение в манифесте "
                             f"«{label}» — ложная тревога")
@@ -402,7 +436,7 @@ def selftest_check() -> list:
             problems.append(f"самопроверка: мутант «{label}» не пойман — детектор слеп")
     # unverified: множества не сравниваются, а ссылки на имя и шаг — да.
     text = dict(_MUTANTS)
-    for label in ("ссылка на чужое имя", "ссылка на соседний шаг"):
+    for label in ("ссылка на чужое имя", "ссылка на соседний шаг", "индекс по шагу"):
         if not check("фикстура", text[label], None, "run"):
             problems.append(f"самопроверка: у пары unverified мутант «{label}» не пойман")
     if check("фикстура", text["ключ убран"], None, "run"):
