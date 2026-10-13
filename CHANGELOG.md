@@ -50,6 +50,60 @@ selftest). Формат — [Keep a Changelog], версии — semver.
   убран выход `sca`, стадия добавлена в `--implemented` без выхода, убран
   `moved` у `pin-apply`; не пойманный мутант или промахнувшаяся мутация
   роняют линт как слепой.
+- **`actions/checkout@v7`, `actions/upload-artifact@v7`,
+  `persist-credentials: false`** (#62). Пины `@v4` объявлены на Node 20, и
+  каждый прогон selftest предупреждал «Node.js 20 is deprecated».
+  `checkout@v5+` и `upload-artifact@v6+` идут на Node 24, им нужен раннер
+  не ниже v2.327.1; для self-hosted раннера из `inputs.runs-on` это его
+  условие. Потребителей `v1` правка касается после переноса тега: чекаут в
+  `pipeline-light.yml` и `upload-artifact` в `actions/sarif-report` (имя
+  артефакта `sarif-<job>-<run_id>` прежнее). Заодно ни один чекаут больше
+  не оставляет токен в git-конфиге рабочей копии (zizmor `artipacked`):
+  `tag-lag` берёт теги анонимно — репозиторий публичный, а push
+  `nightly-bump` получает токен сам (запись ниже).
+- **`tests/lint/assert-action-outputs.py`: охват, id шага, отказ шага**
+  (#61). Три класса дефектов линт пропускал с rc 0 и «OK». Манифест вне
+  списка пар не проверялся вовсе — теперь каждый манифест под `actions/` с
+  непустым `outputs:` обязан быть в списке, иначе ошибка с его именем. id
+  шага в `value:` не сверялся: `steps.run.outputs.sca` вместо
+  `steps.resolve.outputs.sca` давал «OK: 3», а потребитель получает пустую
+  строку, — теперь `value:` обязан ссылаться на шаг, который печатает
+  ключи. Отказ шага, успевшего напечатать ключи, не имел фикстуры — есть.
+  Добавлен мутант `pin-discover` (убран `has-manual`, ровно дефект #19), а
+  исполняемый линтом шаг пишет `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`
+  и `GITHUB_STEP_SUMMARY` во временные файлы, а не в файлы джобы selftest.
+  Пары и мутанты переехали из кода в `tests/lint/action-outputs.yml`: код
+  линта общий с приватным близнецом байт-в-байт (`REQUIRED_IN_BOTH`,
+  devsecops-pipeline#96), у каждого репо свой только этот файл. Пара без
+  мутанта и пара `unverified` без причины — отказ, а не тишина.
+- **`nightly-bump`: токен — только команде `git push`; линт выходов
+  разбирает любую ссылку на шаг** (#62, #61, по ревью). Первый чекаут
+  джобы тоже `persist-credentials: false`: до push она исполняет
+  бинари-кандидаты gitleaks, semgrep и osv-scanner, и токен с `contents:
+  write` в git-конфиге был бы виден каждому. `git push -f origin
+  bump/tools` берёт `GH_TOKEN` своего шага через `git -c credential.helper=
+  -c 'credential.helper=!gh auth git-credential'`, ничего не записывая в
+  конфиги; `# zizmor: ignore[artipacked]` снят. Путь проверит первый прогон
+  `nightly-bump` после мержа. Кандидат osv-scanner качается `curl -fsSL`:
+  сбой загрузки называет причину. `assert-action-outputs.py`: ссылка на
+  шаг в `value:`, которую линт не разбирает целиком (индексная
+  `steps['run'].outputs.x` или `steps.run.outputs['x']`, фильтр
+  `steps.*`), — нарушение: чужой шаг в такой форме проходил с «OK». Два
+  мутанта настоящего `profile-resolve` и фикстуры самопроверки.
+
+### Fixed
+- **`fetch_verified.sh --cosign-bundle`: проверка sigstore bundle**
+  (devsecops-pipeline#98). Вторая форма подписи файла сумм рядом с парой
+  `--cosign-sig`/`--cosign-cert`: bundle (`.sigstore.json` — подпись,
+  сертификат и запись Rekor одним файлом) проверяется `cosign verify-blob
+  --bundle` с теми же обязательными личностью и издателем. Форма ровно
+  одна: обе сразу или неполный набор — rc 2. Так с 1.54.0 подписывает
+  файл сумм syft, стадия приватного близнеца. `assert-cosign-sums.sh`: на
+  bundle syft 1.54.1 позитив, подделанный файл сумм и чужая личность
+  (keyless — в CI); офлайн — сборка вызова `verify-blob` заглушкой cosign
+  в обеих формах. Оба файла — близнецы приватного репо байт-в-байт.
+  Потребителям публичного `v1` правка не видна: cosign-флагов ни одна
+  стадия здесь не передаёт.
 
 ## [1.7.0] — 2026-10-02
 
