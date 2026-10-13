@@ -50,6 +50,15 @@ set -euo pipefail
 HEALTH_ISSUE_READ_ATTEMPTS="${HEALTH_ISSUE_READ_ATTEMPTS:-3}"
 HEALTH_ISSUE_READ_DELAY="${HEALTH_ISSUE_READ_DELAY:-2}"
 
+# Сколько открытых issue читать (#63). gh отдаёт новые первыми, и при прежних
+# `--limit 100` давняя issue в репозитории, где открыто больше сотни, в
+# выборку не попадала: failure заводил дубль, success не закрывал старую.
+# Запас — на порядок; упор в него без совпадения — отказ, а не «issue нет»:
+# отсутствие за краем выборки не доказано. Страницы до лимита `gh issue list`
+# перебирает сам; `gh api --paginate` не взят: REST-список issue отдаёт и PR,
+# их пришлось бы отсеивать.
+HEALTH_ISSUE_LIST_LIMIT=1000
+
 # list_open_issues — JSON открытых issue на stdout; при отказе rc=1.
 #
 # stderr `gh` собирается в отдельный файл, а не сливается в stdout: слияние
@@ -60,7 +69,7 @@ list_open_issues() {
     _hi_delay="$HEALTH_ISSUE_READ_DELAY"
     _hi_err="$(mktemp)"
     while :; do
-        if _hi_out="$(gh issue list --state open --limit 100 \
+        if _hi_out="$(gh issue list --state open --limit "$HEALTH_ISSUE_LIST_LIMIT" \
                           --json number,title 2>"$_hi_err")"; then
             printf '%s' "$_hi_out"
             rm -f "$_hi_err"
@@ -94,17 +103,24 @@ case "$verb" in
 esac
 
 # Фильтруем на своей стороне: точное совпадение заголовка, без подстрок —
-# «похожую» issue закрывать нельзя.
+# «похожую» issue закрывать нельзя. Совпадение — ответ при любом объёме
+# выборки; его отсутствие при выборке, упёршейся в лимит, — отказ (rc 1) до
+# любой записи.
 number="$(
   list_open_issues \
     | python3 -c '
 import json, sys
-want = sys.argv[1]
-for item in json.load(sys.stdin):
-    if item["title"] == want:
-        print(item["number"])
-        break
-' "$title"
+want, limit = sys.argv[1], int(sys.argv[2])
+items = json.load(sys.stdin)
+found = [item["number"] for item in items if item["title"] == want]
+if found:
+    print(found[0])
+elif len(items) >= limit:
+    print(f"::error::здоровье джобы: прочитано {len(items)} открытых issue — упор в лимит"
+          f" {limit}, совпадения нет; отсутствие за краем не доказано, ничего не меняем",
+          file=sys.stderr)
+    sys.exit(1)
+' "$title" "$HEALTH_ISSUE_LIST_LIMIT"
 )"
 
 case "$verb" in
